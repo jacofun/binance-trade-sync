@@ -1,2 +1,185 @@
 # binance-trade-sync
-binance-trade-sync 
+
+将普通币安 USDⓈ-M（U 本位）合约账户的成交明细和资金流水同步到私有 OSS。使用阿里云 FC 3.0 内置 Node.js 20，手工上传代码包，不包含自动部署工作流。
+
+此仓库独立于 `vite-shadcnui-blog`。不会读取、覆盖原站点的交易日志，也不会自动生成计划、复盘或下单。
+
+## 支持范围与数据口径
+
+- 单账户、普通 U 本位合约。默认拉取 `BTCUSDT`，可配置多个交易对。现货、币本位、统一/组合保证金账户不属于此版本范围。
+- `GET /fapi/v1/userTrades`：按配置的交易对拉取实际成交，包括价格、数量、方向、持仓方向、手续费、手续费币种、已实现盈亏等原始字段。
+- `GET /fapi/v1/income`：拉取账户全部资金流水和全部类型，包括资金费用、手续费、盈亏、转账等；不限于 `BINANCE_SYMBOLS`。不把转账当交易利润。
+- 成交和资金流水分别存储。两者中的手续费和已实现盈亏存在对应关系，后续统计不能直接把两份金额相加。
+- 保留十进制金额字符串；ID 统一保存为完整字符串，避免 JavaScript 大整数精度损失。不按买卖方向直接推断开平仓，不自动计算保证金收益率、胜率或 R。
+- 首次默认最近 30 天；后续从每条数据流的游标回看 24 小时，补充延迟数据。结束时间固定为币安服务器时间前 60 秒，正在产生的成交在后续同步获取。
+- 按不超过 7 天的区间查询。返回 1000 条时继续二分时间范围；同一毫秒也达到上限时返回 `DENSE_TIMESTAMP`，不会假装完整。普通接口当前文档限制近 3 个月，本实现保守限制近 80 天；更旧历史须单独导出，尚未实现 CSV 导入。
+
+## 1. 创建 FC
+
+| 配置 | 值 |
+| --- | --- |
+| 地域 | 韩国（首尔）`ap-northeast-2`，须实际验证币安账户接口访问条件 |
+| 函数类型 | 事件函数，使用内置运行时 |
+| 运行时 | Node.js 20 |
+| 执行入口 | `index.handler` |
+| 内存 / CPU | 初始建议 512 MB / 0.5 vCPU，或控制台对应档位 |
+| 超时 | **300 秒**，代码默认在 240 秒预算内停止发起新工作，预留报告和解锁时间 |
+| 单实例并发 / 最大实例数 | 1 / 1；OSS 锁仍然用于防止跨实例、版本或别名的并发写入 |
+| 最小实例数 / 预留实例 | 0 |
+| 公网访问 | 开启；先不配置 VPC。使用固定出口时按实际 VPC/NAT 网络配置调整 |
+| 文件系统挂载 | 不需要，使用 OSS SDK |
+| 日志 | 开启，建议保留 7～14 天 |
+| 触发器 | 首次测试不需要 HTTP 或定时触发器 |
+
+币安 Key 只授予读取所需权限，不授予下单、划转或提现权限。如果设置了 IP 白名单，需要先配置并核实 FC 的固定出网 IP。部署地域不改变账户适用条件，公共行情可达也不代表账户查询可用。
+
+## 2. OSS 和函数角色
+
+使用北京的**私有、标准存储、从未启用版本控制**的 Bucket。境外 FC 使用公网端点，不能填 `-internal` 端点，也不通过公开网站/CDN提供这些文件。
+
+这里的版本控制限制与同步锁有关：OSS 在版本控制为 Enabled 或 Suspended 时会忽略 `x-oss-forbid-overwrite`。代码会在每次获取锁前查询 Bucket 状态并拒绝这两种情况。**如果现有 Bucket 启用了版本控制，请另选独立 Bucket，不要为了部署此函数修改现有 Bucket 的保护设置。** 不要在同步期间更改 Bucket 的版本控制、保留策略或生命周期规则。
+
+创建 RAM 角色，可信主体选择云服务“函数计算”，绑定到本函数。使用 [examples/ram-policy.json](examples/ram-policy.json) 中的策略，将两处 `YOUR_BUCKET` 替换为实际 Bucket；若调整 `OSS_PREFIX`，同步调整对象资源路径。
+
+| 权限 | 范围 / 用途 |
+| --- | --- |
+| `oss:GetObject`、`oss:PutObject` | 仅同步目录；读取和写入数据、进度及报告 |
+| `oss:DeleteObject` | 仅同步目录；释放锁 |
+| `oss:PutObjectAcl` | 仅同步目录；上传时显式设置对象为 private |
+| `oss:GetBucketVersioning` | 指定 Bucket；检查锁的前提条件 |
+
+不需要 `AliyunOSSFullAccess`、Bucket 列举或阿里云长期 AccessKey。SDK 每次调用从 `context.credentials` 读取 FC 角色临时凭证；没有绑定角色会返回 `FC_ROLE_REQUIRED`。角色与 Bucket 按同一阿里云账号配置；跨账号授权需额外处理，不在此处自动设置。
+
+## 3. 环境变量
+
+在 FC 控制台配置。仓库的 `.env.example` 仅为清单，函数不会读取本地 `.env` 文件。
+
+### 必填（共 5 项）
+
+| 名称 | 示例 | 说明 |
+| --- | --- | --- |
+| `BINANCE_API_KEY` | 你的专用只读 Key | HMAC 系统生成型 API Key；不支持 RSA/Ed25519 Key |
+| `BINANCE_API_SECRET` | 对应 Secret | 不写入仓库、请求或日志 |
+| `OSS_BUCKET` | 你的私有 Bucket 名称 | 北京目标 Bucket |
+| `OSS_REGION` | `oss-cn-beijing` | `ali-oss` SDK 格式；**不是首尔地域** |
+| `OSS_ENDPOINT` | `https://oss-cn-beijing.aliyuncs.com` | 北京公网地域端点；不要手工拼入 Bucket 名。若使用已绑定到 Bucket 的自定义域名则配合 `OSS_CNAME=true` |
+
+### 可选（不填即使用默认值）
+
+| 名称 | 默认值 | 说明 |
+| --- | --- | --- |
+| `BINANCE_BASE_URL` | `https://fapi.binance.com` | 实盘；仅另外允许 `https://demo-fapi.binance.com`，使用测试环境专用 Key 和独立 OSS_PREFIX |
+| `BINANCE_SYMBOLS` | `BTCUSDT` | 逗号分隔，例如 `BTCUSDT,ETHUSDT`，最多 20 个；仅影响成交明细 |
+| `OSS_PREFIX` | `fc/binance-sync/owner` | 无开头或结尾斜线；与 RAM 策略一致。一个前缀只对应一个账户/Key/环境 |
+| `OSS_CNAME` | `false` | 使用 Bucket 绑定的自定义公网域名时填 `true`，不能填写 CDN 域名 |
+| `SYNC_INITIAL_DAYS` | `30` | 未建立游标的数据流初次回溯天数，1～80；不改变已有游标 |
+| `SYNC_OVERLAP_SECONDS` | `86400` | 每次增量同步重查的时间，60～604800 秒 |
+| `REQUEST_TIMEOUT_MS` | `15000` | 单次网络请求超时，1000～30000 毫秒 |
+| `SYNC_MAX_SECONDS` | `240` | 本次执行预算，30～240 秒；FC 超时仍应设 300 秒 |
+| `BINANCE_RECV_WINDOW` | `5000` | 币安签名接收窗口，1000～60000 毫秒；会先校准时间，遇 -1021 只校时重试一次 |
+| `BINANCE_REQUEST_GAP_MS` | `250` | 请求间隔，100～5000 毫秒；遇 429/418 立即停止，遵守返回的等待时间后手工重试 |
+| `SYNC_HTTP_TOKEN` | 不设置 | 仅 HTTP 使用，至少 32 个字符的字母/数字/下划线/短横线。未设置时拒绝所有 HTTP 同步请求；控制台事件和 InvokeFunction 不需要它 |
+
+如 OSS 账号要求使用自定义域名访问大陆 Bucket，填写已绑定该 Bucket 的 HTTPS 公网域名并设 `OSS_CNAME=true`。不要直接复用仅供原北京函数访问的内网地址。
+
+## 4. 手工打包和部署
+
+本地需要 Node.js 20+ 和 Python 3：
+
+```bash
+git clone https://github.com/jacofun/binance-trade-sync.git
+cd binance-trade-sync
+npm ci --omit=dev --ignore-scripts
+npm test
+python3 scripts/package.py
+```
+
+Windows 可将最后一行改为 `py scripts/package.py` 或 `python scripts/package.py`。`npm run package` 使用的是 `python3` 命令。
+
+生成 `dist/binance-trade-sync.zip` 后，在 FC 的“代码”页面选择上传 ZIP 包并部署。包根目录直接是 `index.js`、`package.json`、`src/`、`node_modules/`，不能多套一层仓库目录。打包脚本仅打包本地文件，不调用部署接口，不包含 `.env`、测试或 GitHub 配置。请使用这个依赖完整的包，GitHub“Download ZIP”的源代码包不能直接替代它。
+
+## 5. 第一次测试
+
+FC 控制台“配置测试参数”选择自定义 JSON，填写：
+
+```json
+{ "action": "sync" }
+```
+
+运行后检查返回的 `status` 为 `completed`、`newRecords` 和 `completedWindows`，并在 OSS 查看数据和 `state.json`。没有成交/资金流水的月份不会创建空分区；即使结果为零，也会保存进度与运行报告。控制台调用会真实写入数据。
+
+再执行相同事件，重复记录不会新增。增量会重查最近 24 小时，因此 `fetchedRecords` 不是新增条数，`newRecords` 才是本次实际新增条数；这些都不是交易胜率或“完成的一笔交易”数量。
+
+指定时间补查时使用：
+
+```json
+{
+  "action": "sync",
+  "startTime": "2026-11-01T00:00:00+08:00",
+  "endTime": "2026-11-02T00:00:00+08:00"
+}
+```
+
+请把日期改为实际时间，必须在近 80 天内，结束时间早于服务器当前时间至少 60 秒。支持毫秒时间戳或带时区的 ISO 时间，区间含起止毫秒。显式补查只合并分区，不推进日常同步游标，避免跳过中间缺口；补查期间中断则重发原请求。
+
+## 6. 可选 HTTP 入口
+
+此版本支持 FC 3.0 内置运行时的 HTTP 事件映射，不需要启动 HTTP Server 或配置监听端口。不兼容 FC 2.0 旧式 `(request, response, context)` HTTP Handler。
+
+先生成令牌：
+
+```bash
+node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
+```
+
+将结果配置到 `SYNC_HTTP_TOKEN`，创建仅 POST 的 HTTP 触发器，建议启用 FC 签名认证。调用时同时携带 `X-Sync-Token: <令牌>` 和 JSON 请求体 `{"action":"sync"}`；签名触发器另须由调用方 SDK 生成合法 FC 签名。令牌是服务端之间的凭据，不放进前端代码，不把阿里云 AK 放到浏览器。
+
+FC 网关签名与 `X-Sync-Token` 是两层校验；本代码不自行验证阿里云签名，网关负责该层认证。即使触发器误设为匿名，没有有效令牌的 HTTP 请求也不能开始同步。
+
+本版本不在返回后继续后台执行。长时间调用需调用方设置相应超时；HTTP 返回 200 且 `status=completed` 才代表全部完成。控制台事件失败会抛出脱敏后的错误，而非返回假成功。FC 异步调用的 202 仅代表接受请求，完成情况看运行报告。
+
+## OSS 文件结构
+
+| 路径（相对 OSS_PREFIX） | 内容 |
+| --- | --- |
+| `usdm/trades/BTCUSDT/2026-11.json` | 按交易对、UTC 月分区的成交原始记录 |
+| `usdm/income/2026-11.json` | 按 UTC 月分区的全账户资金流水 |
+| `state.json` | 每个交易对的成交游标、全账户资金流水游标 |
+| `runs/<requestId>.json` | 本次时间区间、条数、请求数、完成或失败状态 |
+| `sync.lock.json` | 正在执行的同步锁；正常结束后删除 |
+
+分区文档包含 `schemaVersion: 1`、`product: "usdm"`、`kind`、`symbol`、`month`、`updatedAt`、`binding` 和 `records`。`binding` 是 API Key 和环境的单向摘要，不包含 Key/Secret 本身。时间戳保留毫秒，文件按 UTC 月归档，前端展示时再转为北京时间。
+
+同一成交按 `symbol + id` 去重；资金流水按 `incomeType + tranId` 去重。单次对象替换是原子的，多个分区与进度文件不是同一事务：先写明细，全部成功后再推进该段游标；失败后重查并去重。若响应丢失，重试后的 `newRecords` 会以已落盘内容为准。
+
+## 重试和维护
+
+- 普通失败可重新发送 `{"action":"sync"}`，已经完成的分段无需从头补录。若单次数据过多，可多次执行直到完成。
+- `BINANCE_RATE_LIMIT`：等待错误中的 `retryAfterSeconds` 后再试；不绕过封禁或不断重试。
+- `BINANCE_ACCESS_DENIED`：检查账户适用条件、出口和 IP 白名单。函数不会切换域名或代理绕过限制。
+- `HISTORY_GAP`：游标落后超过 80 天，不会静默把游标跳到最近区间。需先处理历史缺口；当前不支持自动下载历史导出文件。
+- `STATE_MISMATCH`：换账户、实盘/测试环境或 API Key 后不能共用旧目录。最简单的密钥轮换方式是使用新的 `OSS_PREFIX` 并重新同步，旧数据保留；同账户历史合并需明确迁移，不要只删除状态文件绕过校验。
+- 仅增加 `BINANCE_SYMBOLS` 时，新交易对按初始天数建立独立游标；移除交易对不会删除历史分区。首次区间不覆盖更早的开仓，数据同步并不保证能够还原每笔完整持仓。
+- `SYNC_BUSY`：先确认当前调用是否还在运行。锁没有自动过期接管；FC 被强制终止或删除锁失败时会保留锁。**确认所有版本/别名的调用和待重试任务均已结束后**，手工删除且仅删除 `OSS_PREFIX/sync.lock.json`，再重试；不要在任务仍执行时清锁，不要给锁配置自动生命周期删除。
+- 日志只输出请求编号、计数和脱敏错误码，不输出密钥、签名 URL、原始响应或 SDK 错误堆栈。`runs/` 中也不包含密钥或完整成交，但仍应保持私有。
+- 只有当前运行拿到锁之后的结果会写入 `runs/`；配置、鉴权、角色或锁获取失败时看 FC 错误日志。
+
+## 开发验证
+
+```bash
+npm ci --ignore-scripts
+npm test
+npm run check
+npm audit --omit=dev
+```
+
+测试使用模拟币安响应和 OSS 适配器，覆盖大整数、HMAC、分页截断、限流、时钟偏差、重复执行、分段恢复、资金流水唯一性、补查游标、并发锁、Bucket 版本控制、HTTP 鉴权和错误脱敏。上线前仍需在实际 FC 中核实角色临时凭证、首尔出口、币安读取权限和北京 OSS 写入；本仓库不包含真实账户凭据。
+
+## 官方参考
+
+- [币安 U 本位成交接口](https://developers.binance.com/docs/derivatives/usds-margined-futures/trade/rest-api/Account-Trade-List)
+- [币安资金流水接口](https://developers.binance.com/docs/derivatives/usds-margined-futures/account/rest-api/Get-Income-History)
+- [FC Node.js 请求处理程序](https://help.aliyun.com/zh/functioncompute/request-handlers)
+- [FC HTTP 请求与响应格式](https://help.aliyun.com/zh/functioncompute/http-trigger-invoking-function)
+- [FC 函数角色](https://help.aliyun.com/zh/functioncompute/grant-function-compute-permissions-to-access-other-alibaba-cloud-services)
+- [OSS PutObject 与禁止覆盖限制](https://help.aliyun.com/zh/oss/developer-reference/putobject)

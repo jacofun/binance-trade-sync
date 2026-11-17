@@ -1,0 +1,17 @@
+{
+  "name": "binance-trade-sync",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Manually deployed Alibaba Cloud FC Binance USD-M trade synchronizer",
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "test": "node --test",
+    "check": "node --check index.js && node --check src/config.js && node --check src/binance.js && node --check src/store.js && node --check src/sync.js",
+    "package": "python3 scripts/package.py"
+  },
+  "dependencies": {
+    "ali-oss": "6.23.0",
+    "json-bigint": "1.0.0"
+  }
+}

@@ -1,0 +1,15 @@
+{
+  "Version": "1",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": ["oss:GetObject", "oss:PutObject", "oss:DeleteObject", "oss:PutObjectAcl"],
+      "Resource": ["acs:oss:*:*:YOUR_BUCKET/fc/binance-sync/owner/*"]
+    },
+    {
+      "Effect": "Allow",
+      "Action": ["oss:GetBucketVersioning"],
+      "Resource": ["acs:oss:*:*:YOUR_BUCKET"]
+    }
+  ]
+}
