@@ -1,5 +1,4 @@
 """Package local code and installed dependencies; never deploy or include .env."""
-import json
 from pathlib import Path
 from zipfile import ZipFile, ZIP_DEFLATED
 
@@ -11,6 +10,8 @@ dest.parent.mkdir(exist_ok=True)
 paths = [root / name for name in ("index.js", "package.json", "package-lock.json")]
 paths += sorted((root / "src").rglob("*.js"))
 paths += sorted(p for p in (root / "node_modules").rglob("*") if p.is_file())
+paths = [p for p in paths if not any(part in {".git", ".github"} or part.startswith(".env")
+                                    for part in p.relative_to(root).parts)]
 with ZipFile(dest, "w", ZIP_DEFLATED) as archive:
     for path in paths:
         archive.write(path, path.relative_to(root).as_posix())

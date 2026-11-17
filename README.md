@@ -1,6 +1,6 @@
 # binance-trade-sync
 
-将普通币安 USDⓈ-M（U 本位）合约账户的成交明细和资金流水同步到私有 OSS。使用阿里云 FC 3.0 内置 Node.js 20，手工上传代码包，不包含自动部署工作流。
+将普通币安 USDⓈ-M（U 本位）合约账户的成交明细和资金流水同步到私有 OSS。使用阿里云 FC 3.0 内置 Node.js 20，支持 GitHub Actions 在 main 更新时自动部署，也支持手工上传代码包。
 
 此仓库独立于 `vite-shadcnui-blog`。不会读取、覆盖原站点的交易日志，也不会自动生成计划、复盘或下单。
 
@@ -82,7 +82,38 @@
 
 如 OSS 账号要求使用自定义域名访问大陆 Bucket，填写已绑定该 Bucket 的 HTTPS 公网域名并设 `OSS_CNAME=true`。不要直接复用仅供原北京函数访问的内网地址。
 
-## 4. 手工打包和部署
+## 4. GitHub Actions 自动部署
+
+工作流：[.github/workflows/deploy-fc.yml](.github/workflows/deploy-fc.yml)。每次推送到 `main` 都会执行，也可在 Actions 的 `Deploy FC` 页面选择 `main` 手工运行。
+
+Repository secrets 只需要：
+
+| Secret | 用途 |
+| --- | --- |
+| `ALIYUN_FC_ACCESS_KEY_ID` | 部署使用的 RAM 用户 AccessKey ID |
+| `ALIYUN_FC_ACCESS_KEY_SECRET` | 对应 AccessKey Secret |
+
+部署账号需要 `fc:GetFunction` 和 `fc:UpdateFunction` 权限。FC API 文档将这两项列为 All Resource；按账号的实际授权策略配置，缺少读取权限也无法完成验证。部署流程不使用 OSS 上传中转，因此不需要为部署账号增加 OSS 权限或配置代码包 Bucket。
+
+`s.yaml` 中记录目标：首尔 `ap-northeast-2`、函数 `binance-trade-sync`、`nodejs20`、入口 `index.handler`、超时 `300` 秒、代码包 `./dist/binance-trade-sync.zip`。它是 CI 的目标参数来源；CI 使用官方 FC 3.0 Python SDK 更新已有函数，不执行 Serverless Devs 全量资源部署。
+
+执行步骤：
+
+1. 在 Node.js 20 下安装锁定的生产依赖，执行语法检查、函数测试和依赖审计。
+2. 测试部署脚本的配置保留逻辑，打包源码与生产依赖。
+3. 检查当前提交仍为 main 最新提交；已有新提交时跳过旧版本的部署。
+4. 在 Secret 仅注入到部署步骤的条件下，通过 FC API 直接上传 ZIP，更新代码和 300 秒超时。
+5. 回读函数，等待 Active/Successful，校验代码 CRC-64、入口、运行时和超时，检查环境变量、角色、CPU、内存、磁盘、网络等原有配置保持一致。校验未通过则工作流失败。
+
+部署到 `LATEST`，与你导出的 HTTP 触发器 qualifier 一致。现有触发器及其签名认证、角色 `aliyunfcdefaultrole`、0.35 vCPU、512 MB 内存、10240 MB 磁盘、网络及资源组均由 FC 控制台管理，工作流不提交这些字段。原有 `timeout=60` 会调整为 `300`，适配同步代码的执行预算。
+
+工作流使用固定 concurrency group 串行部署，不取消正在执行的更新。每次运行成功后，在 Actions Summary 查看源代码提交、ZIP SHA-256 和 FC 代码 CRC-64。不会输出 FC 环境变量、Secret、完整 API 响应或 SDK 错误堆栈。
+
+币安密钥和 OSS 参数仍按上节配置在 **FC 环境变量** 中，不是上述两个 GitHub Secrets。部署成功只说明代码和配置验证通过；不会在流水线中调用同步业务、访问币安或修改交易记录，首次业务验证按下一节在控制台执行。
+
+### 本地打包和手工部署
+
+如已使用 GitHub Actions 自动部署，无需再次手工上传。以下保留本地打包方法。
 
 本地需要 Node.js 20+ 和 Python 3：
 
@@ -173,6 +204,12 @@ npm run check
 npm audit --omit=dev
 ```
 
+部署脚本测试另需安装 `python -m pip install -r scripts/requirements-deploy.txt`，再执行：
+
+```bash
+python -m unittest discover -s test -p 'test_deploy_fc.py' -v
+```
+
 测试使用模拟币安响应和 OSS 适配器，覆盖大整数、HMAC、分页截断、限流、时钟偏差、重复执行、分段恢复、资金流水唯一性、补查游标、并发锁、Bucket 版本控制、HTTP 鉴权和错误脱敏。上线前仍需在实际 FC 中核实角色临时凭证、首尔出口、币安读取权限和北京 OSS 写入；本仓库不包含真实账户凭据。
 
 ## 官方参考
@@ -182,4 +219,6 @@ npm audit --omit=dev
 - [FC Node.js 请求处理程序](https://help.aliyun.com/zh/functioncompute/request-handlers)
 - [FC HTTP 请求与响应格式](https://help.aliyun.com/zh/functioncompute/http-trigger-invoking-function)
 - [FC 函数角色](https://help.aliyun.com/zh/functioncompute/grant-function-compute-permissions-to-access-other-alibaba-cloud-services)
+- [FC 3.0 UpdateFunction](https://help.aliyun.com/en/functioncompute/api-fc-2023-03-30-updatefunction)
+- [FC 3.0 代码包参数和 CRC-64](https://help.aliyun.com/en/functioncompute/api-fc-2023-03-30-struct-inputcodelocation)
 - [OSS PutObject 与禁止覆盖限制](https://help.aliyun.com/zh/oss/developer-reference/putobject)

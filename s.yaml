@@ -1,0 +1,16 @@
+# CI reads this target and updates only code + timeout through the FC 3.0 SDK.
+# Runtime/handler are checked against the existing function before deployment.
+# Environment variables, RAM role, network, resources and triggers stay in FC.
+edition: 3.0.0
+name: binance-trade-sync
+access: default
+resources:
+  tradeSync:
+    component: fc3
+    props:
+      region: ap-northeast-2
+      functionName: binance-trade-sync
+      runtime: nodejs20
+      handler: index.handler
+      timeout: 300
+      code: ./dist/binance-trade-sync.zip
