@@ -89,7 +89,9 @@ OSS 支持两种凭据来源：配置 FC 环境变量 `ACCESS_KEY_ID` 和 `ACCES
 | `SYNC_MAX_SECONDS` | `240` | 本次执行预算，30～240 秒；FC 超时仍应设 300 秒 |
 | `BINANCE_RECV_WINDOW` | `5000` | 币安签名接收窗口，1000～60000 毫秒；会先校准时间，遇 -1021 只校时重试一次 |
 | `BINANCE_REQUEST_GAP_MS` | `250` | 请求间隔，100～5000 毫秒；遇 429/418 立即停止，遵守返回的等待时间后手工重试 |
-| `SYNC_HTTP_TOKEN` | 不设置 | 仅 HTTP 使用，至少 32 个字符的字母/数字/下划线/短横线。未设置时拒绝所有 HTTP 同步请求；控制台事件和 InvokeFunction 不需要它 |
+| `SYNC_JWT_JWKS` | 必填（HTTP） | RS256 公钥 JWKS 的 JSON 字符串；缺失或无效时 HTTP 返回 503，控制台事件不受影响 |
+| `SYNC_JWT_ISSUER` | `https://www.yanxiao.me` | 必须与北京签发端一致 |
+| `SYNC_JWT_AUDIENCE` | `binance-trade-sync` | 必须与北京签发端一致 |
 
 如 OSS 账号要求使用自定义域名访问大陆 Bucket，填写已绑定该 Bucket 的 HTTPS 公网域名并设 `OSS_CNAME=true`。不要直接复用仅供原北京函数访问的内网地址。
 
@@ -164,21 +166,55 @@ FC 控制台“配置测试参数”选择自定义 JSON，填写：
 
 请把日期改为实际时间，必须在近 80 天内，结束时间早于服务器当前时间至少 60 秒。支持毫秒时间戳或带时区的 ISO 时间，区间含起止毫秒。显式补查只合并分区，不推进日常同步游标，避免跳过中间缺口；补查期间中断则重发原请求。
 
-## 6. 可选 HTTP 入口
+## 6. 登录后前端直连首尔
 
-此版本支持 FC 3.0 内置运行时的 HTTP 事件映射，不需要启动 HTTP Server 或配置监听端口。不兼容 FC 2.0 旧式 `(request, response, context)` HTTP Handler。
+调用链为：前端携带网站 Cookie 与 CSRF → 北京 `POST /api/private-auth/trading/binance/token` → 获得 120 秒 JWT → 前端 `POST /trade/api` → CDN 转发首尔。只有现有登录系统中的 `owner` 可以领取凭证，北京不转发同步请求。前端请求体固定为 `{"action":"sync"}`；原始成交和资金流水仍独立保存，不自动生成网站日志或统计。
 
-先生成令牌：
+### 生成密钥和配置两端
 
-```bash
-node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
+在自己的电脑、此仓库目录执行一次（Node.js 20+）：
+
+```sh
+node scripts/generate-sync-keys.mjs
 ```
 
-将结果配置到 `SYNC_HTTP_TOKEN`，创建仅 POST 的 HTTP 触发器，建议启用 FC 签名认证。调用时同时携带 `X-Sync-Token: <令牌>` 和 JSON 请求体 `{"action":"sync"}`；签名触发器另须由调用方 SDK 生成合法 FC 签名。令牌是服务端之间的凭据，不放进前端代码，不把阿里云 AK 放到浏览器。
+脚本生成 `.local-sync-keys/`，不打印密钥，目录已忽略并禁止覆盖已有目录。`beijing.env.json` 含私钥，只用于北京 FC；`seoul.env.json` 含公钥验证配置，用于首尔 FC；`public-jwks.json` 用于首尔 HTTP 触发器。文件中的 JSON 对象是**增量环境变量**，请逐项新增到现有 FC 环境变量，保留原登录和币安/OSS 配置。不要用它们覆盖函数的全部环境变量。工作流只部署代码，不写入这些密钥。
 
-FC 网关签名与 `X-Sync-Token` 是两层校验；本代码不自行验证阿里云签名，网关负责该层认证。即使触发器误设为匿名，没有有效令牌的 HTTP 请求也不能开始同步。
+北京需要配置：
 
-本版本不在返回后继续后台执行。长时间调用需调用方设置相应超时；HTTP 返回 200 且 `status=completed` 才代表全部完成。控制台事件失败会抛出脱敏后的错误，而非返回假成功。FC 异步调用的 202 仅代表接受请求，完成情况看运行报告。
+| 环境变量 | 值 |
+| --- | --- |
+| `BINANCE_SYNC_PRIVATE_KEY` | 生成文件中的 PKCS#8 PEM 私钥，可使用真实换行或字面量 `\n` |
+| `BINANCE_SYNC_KEY_ID` | `trade-sync-v1`，与 JWKS 的 `kid` 一致 |
+| `BINANCE_SYNC_ISSUER` | `https://www.yanxiao.me` |
+| `BINANCE_SYNC_AUDIENCE` | `binance-trade-sync` |
+| `BINANCE_SYNC_URL` | `https://www.yanxiao.me/trade/api`，必须为网站同源 HTTPS 地址 |
+
+首尔新增：`SYNC_JWT_JWKS`（JSON **字符串**）、`SYNC_JWT_ISSUER`、`SYNC_JWT_AUDIENCE`，值见 `seoul.env.json`。原 `BINANCE_*`、`OSS_*`、`ACCESS_KEY_ID`、`ACCESS_KEY_SECRET` 保持原配置，删除旧 `SYNC_HTTP_TOKEN`，HTTP 不再接受 `X-Sync-Token`。
+
+### 首尔 HTTP 触发器
+
+- 方法仅 `POST`，鉴权方式改为 **JWT 认证**，替换原 `function` 签名认证；固定 Bearer 认证与此短期 JWT 方案不兼容。
+- JWKS 使用生成的 `public-jwks.json` 完整对象，仅含公钥，禁止放入私钥。
+- Token 位置 `Header`，参数名 `Authorization`，去除前缀为 `Bearer `（包含末尾空格），匹配模式为“全部匹配”。
+- 保留原 `Authorization` 请求头，不需要将 Claim 映射为用户身份 Header。函数内部再次验证 RS256、`kid`、签发者、受众、`trading:sync` 用途、签发/过期时间和不超过 120 秒的有效期，不信任外部身份 Header。
+- 使用 FC 3.0 内置 Node.js 20 HTTP 事件映射；不启动 HTTP Server，不设置监听端口。本仓库工作流不会修改触发器。
+
+### CDN
+
+`https://www.yanxiao.me/trade/api` 回源首尔 HTTP URL，透传 `POST` 方法、JSON 请求体和 `Authorization` Header，回源使用 HTTPS。该路径禁用缓存，响应头保留 `Cache-Control: no-store`，回源超时须覆盖同步运行时间（FC 300 秒）。浏览器设置 310 秒等待，但 CDN 套餐的实际超时上限仍需在控制台核实；如果 CDN 上限更短，长同步会中断响应，应缩短单次同步范围或另行设计异步查询。
+
+这是同源调用，无需把网站 Cookie 的 Path 扩大到 `/trade/api`，也无需首尔 CORS。前端主动设置 `credentials: omit`，只发送当前 JWT，不把网站 Cookie、CSRF、阿里云 AK 或币安密钥发送到首尔。
+
+### 验证和边界
+
+1. 未登录、CSRF 错误、非 owner、已注销或已撤销会话不能在北京领取凭证。
+2. 首尔拒绝缺失/篡改/过期/用途错误的 JWT；未配置有效公钥时不会开始同步。控制台 `{ "action": "sync" }` 和受 RAM 授权的 InvokeFunction 事件仍可用。
+3. 登录后点击“同步币安记录”，只有 HTTP 200 且 `status=completed` 才视为完成，页面显示本次新增条数。
+4. 令牌只存当前请求内存，不写浏览器存储或日志。它在有效期内可重复使用；注销网站会阻止签发新令牌，已签发令牌最多继续有效 120 秒，已开始的同步继续执行。并发同步仍由 OSS 锁控制。
+5. 网络中断或超时后不自动重试；先检查首尔 FC 日志与 OSS `runs/` 报告。代码不在响应返回后继续后台执行。
+6. 轮换时先把新旧公钥一起加入首尔环境变量和触发器 JWKS，再更新北京私钥与 `kid`，等待旧令牌全部过期后移除旧公钥。支持最多 5 把不同 `kid` 的 RS256 公钥。
+
 
 ## OSS 文件结构
 

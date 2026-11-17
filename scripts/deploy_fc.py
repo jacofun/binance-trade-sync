@@ -52,7 +52,7 @@ def load_zip(path):
     try:
         with zipfile.ZipFile(io.BytesIO(data)) as archive:
             names = archive.namelist()
-            required = {"index.js", "package.json", "src/sync.js", "node_modules/ali-oss/package.json"}
+            required = {"index.js", "package.json", "src/sync.js", "src/auth.js", "node_modules/ali-oss/package.json"}
             if not required.issubset(names) or len(names) != len(set(names)):
                 raise DeployError("ZIP layout or dependencies are invalid.")
             if any(name.startswith("/") or ".." in Path(name).parts or

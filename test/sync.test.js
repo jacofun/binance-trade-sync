@@ -54,7 +54,7 @@ const response = (data, status = 200, headers = {}) => new Response(typeof data 
 function restClient(fetchImpl) { return new BinanceClient(config(), { fetchImpl, now: () => NOW, sleep: async () => {} }); }
 
 test("config rejects arbitrary credential destinations, internal OSS and unsafe prefixes", () => {
-  for (const delta of [{ BINANCE_BASE_URL: "https://example.com" }, { OSS_ENDPOINT: "https://oss-cn-beijing-internal.aliyuncs.com" }, { OSS_PREFIX: "../private" }, { SYNC_MAX_SECONDS: "300" }, { SYNC_HTTP_TOKEN: "short" }]) {
+  for (const delta of [{ BINANCE_BASE_URL: "https://example.com" }, { OSS_ENDPOINT: "https://oss-cn-beijing-internal.aliyuncs.com" }, { OSS_PREFIX: "../private" }, { SYNC_MAX_SECONDS: "300" }]) {
     assert.throws(() => loadConfig({ ...env, ...delta }), /配置无效/);
   }
   assert.equal(config().endpoint, env.OSS_ENDPOINT);
@@ -292,22 +292,6 @@ test("empty explicit OSS keys retain role authentication", async () => {
   const client = await createOssClient(cfg, { credentials: { accessKeyId: "role-id", accessKeySecret: "role-secret", securityToken: "role-token" } }, SDK);
   assert.equal(client.options.accessKeyId, "role-id");
   assert.equal(client.options.stsToken, "role-token");
-});
-
-test("HTTP requires POST and token; malformed requests never start synchronization", async () => {
-  let runs = 0;
-  const token = "a".repeat(64);
-  const handler = makeHandler({ env: { ...env, SYNC_HTTP_TOKEN: token }, logger: { info() {}, error() {} }, run: async () => { runs++; return { requestId: "test" }; } });
-  const event = (method = "POST", headers = {}) => ({ requestContext: { http: { method } }, headers, body: '{"action":"sync"}' });
-  assert.equal((await handler(event("GET"))).statusCode, 405);
-  assert.equal((await handler(event())).statusCode, 401);
-  const good = event("POST", { "X-Sync-Token": token });
-  good.isBase64Encoded = true;
-  good.body = Buffer.from(good.body).toString("base64");
-  assert.equal((await handler(Buffer.from(JSON.stringify(good)))).statusCode, 200);
-  assert.equal(runs, 1);
-  const disabled = makeHandler({ env, logger: { info() {}, error() {} } });
-  assert.equal((await disabled(event())).statusCode, 403);
 });
 
 test("console events report genuine failures and redact unexpected SDK details", async () => {

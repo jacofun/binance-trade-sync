@@ -1,4 +1,4 @@
-import { timingSafeEqual } from "node:crypto";
+import { authorize } from "./src/auth.js";
 import { loadConfig, parseRequest } from "./src/config.js";
 import { synchronize } from "./src/sync.js";
 import { SyncError, safeError } from "./src/errors.js";
@@ -12,31 +12,20 @@ function decode(value) {
   }
   return value;
 }
-function authorize(headers, token) {
-  // HTTP is fail-closed even if a trigger is accidentally configured anonymous.
-  if (!token) throw new SyncError("HTTP_DISABLED", "HTTP 同步未启用，请配置 SYNC_HTTP_TOKEN 或使用 FC 控制台测试事件。", 403);
-  const auth = Object.entries(headers || {}).find(([key]) => key.toLowerCase() === "x-sync-token")?.[1];
-  const supplied = Buffer.from(typeof auth === "string" ? auth : "");
-  const expected = Buffer.from(token);
-  if (supplied.length !== expected.length || !timingSafeEqual(supplied, expected)) {
-    throw new SyncError("UNAUTHORIZED", "同步请求认证失败。", 401);
-  }
-}
-
 export function makeHandler({ env = process.env, run = synchronize, logger = console } = {}) {
   return async function handle(event, context = {}) {
     let http = false;
     try {
       const input = decode(event);
       http = !!input?.requestContext?.http;
-      const config = loadConfig(env);
       let body = input;
       if (http) {
         if (input.requestContext.http.method !== "POST") throw new SyncError("METHOD_NOT_ALLOWED", "只支持 POST 请求。", 405);
-        authorize(input.headers, config.httpToken);
+        authorize(input.headers, env);
         if (typeof input.body !== "string" || input.body.length > 16384) throw new SyncError("INVALID_REQUEST", "HTTP 请求体无效或过大。", 400);
         body = decode(input.isBase64Encoded ? Buffer.from(input.body, "base64").toString("utf8") : input.body);
       }
+      const config = loadConfig(env);
       const request = parseRequest(body);
       const result = await run(config, request, context);
       logger.info(JSON.stringify({ event: "sync_completed", requestId: result.requestId, newRecords: result.newRecords, completedWindows: result.completedWindows }));

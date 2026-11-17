@@ -107,7 +107,7 @@ class DeployTests(unittest.TestCase):
             path = Path(directory) / "code.zip"
             def write_zip(extra):
                 with zipfile.ZipFile(path, "w") as archive:
-                    for name in ["index.js", "package.json", "src/sync.js", "node_modules/ali-oss/package.json"] + extra:
+                    for name in ["index.js", "package.json", "src/sync.js", "src/auth.js", "node_modules/ali-oss/package.json"] + extra:
                         archive.writestr(name, "test")
             write_zip([])
             self.assertTrue(module.load_zip(path))

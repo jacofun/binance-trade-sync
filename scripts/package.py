@@ -16,6 +16,6 @@ with ZipFile(dest, "w", ZIP_DEFLATED) as archive:
     for path in paths:
         archive.write(path, path.relative_to(root).as_posix())
 with ZipFile(dest) as archive:
-    assert {"index.js", "package.json", "src/sync.js"} <= set(archive.namelist())
+    assert {"index.js", "package.json", "src/sync.js", "src/auth.js"} <= set(archive.namelist())
     assert not any(Path(name).name.startswith(".env") for name in archive.namelist())
 print(dest)

@@ -38,12 +38,10 @@ export function loadConfig(env = process.env) {
   if (Boolean(ossAccessKeyId) !== Boolean(ossAccessKeySecret)) {
     throw new SyncError("INVALID_CONFIG", "ACCESS_KEY_ID 与 ACCESS_KEY_SECRET 必须同时配置或同时留空。");
   }
-  const httpToken = env.SYNC_HTTP_TOKEN?.trim() || "";
-  if (httpToken && (httpToken.length < 32 || httpToken.length > 256 || !/^[A-Za-z0-9_-]+$/.test(httpToken))) invalid("SYNC_HTTP_TOKEN");
   return {
     apiKey: required(env, "BINANCE_API_KEY"), apiSecret: required(env, "BINANCE_API_SECRET"),
     baseUrl, symbols, endpoint, region, bucket, prefix, ossAccessKeyId, ossAccessKeySecret,
-    cname: env.OSS_CNAME === "true", httpToken,
+    cname: env.OSS_CNAME === "true",
     initialDays: integer(env, "SYNC_INITIAL_DAYS", 30, 1, 80),
     overlapMs: integer(env, "SYNC_OVERLAP_SECONDS", 86400, 60, 604800) * 1000,
     requestTimeoutMs: integer(env, "REQUEST_TIMEOUT_MS", 15000, 1000, 30000),
