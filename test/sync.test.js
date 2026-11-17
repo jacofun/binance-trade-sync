@@ -268,6 +268,32 @@ test("FC role credentials are required and a client is constructed per invocatio
   assert.equal(first.options.endpoint, env.OSS_ENDPOINT);
 });
 
+test("explicit OSS AccessKey works without an FC role and takes precedence without mixing STS tokens", async () => {
+  const cfg = loadConfig({ ...env, ACCESS_KEY_ID: "oss-access-id", ACCESS_KEY_SECRET: "oss-access-secret" });
+  class SDK { constructor(options) { this.options = options; } }
+  const noRole = await createOssClient(cfg, {}, SDK);
+  assert.equal(noRole.options.accessKeyId, "oss-access-id");
+  assert.equal(noRole.options.accessKeySecret, "oss-access-secret");
+  assert.equal(Object.hasOwn(noRole.options, "stsToken"), false);
+  const withRole = await createOssClient(cfg, { credentials: { accessKeyId: "role-id", accessKeySecret: "role-secret", securityToken: "role-token" } }, SDK);
+  assert.deepEqual(withRole.options, noRole.options);
+});
+
+test("partial OSS AccessKey configuration fails without leaking values or falling back to a role", async () => {
+  for (const delta of [{ ACCESS_KEY_ID: "only-secret-id" }, { ACCESS_KEY_SECRET: "only-secret-value" }, { ACCESS_KEY_ID: "only-secret-id", ACCESS_KEY_SECRET: " " }]) {
+    assert.throws(() => loadConfig({ ...env, ...delta }), (error) => error.code === "INVALID_CONFIG" && !error.message.includes("only-secret"));
+  }
+  await assert.rejects(() => createOssClient({ ...config(), ossAccessKeyId: "only-secret-id" }, { credentials: { accessKeyId: "role-id", accessKeySecret: "role-secret", securityToken: "role-token" } }), { code: "INVALID_CONFIG" });
+});
+
+test("empty explicit OSS keys retain role authentication", async () => {
+  const cfg = loadConfig({ ...env, ACCESS_KEY_ID: " ", ACCESS_KEY_SECRET: "" });
+  class SDK { constructor(options) { this.options = options; } }
+  const client = await createOssClient(cfg, { credentials: { accessKeyId: "role-id", accessKeySecret: "role-secret", securityToken: "role-token" } }, SDK);
+  assert.equal(client.options.accessKeyId, "role-id");
+  assert.equal(client.options.stsToken, "role-token");
+});
+
 test("HTTP requires POST and token; malformed requests never start synchronization", async () => {
   let runs = 0;
   const token = "a".repeat(64);

@@ -33,11 +33,16 @@ export function loadConfig(env = process.env) {
   const bucket = required(env, "OSS_BUCKET");
   if (!/^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$/.test(bucket)) invalid("OSS_BUCKET");
   if (env.OSS_CNAME && !["true", "false"].includes(env.OSS_CNAME)) invalid("OSS_CNAME");
+  const ossAccessKeyId = env.ACCESS_KEY_ID?.trim() || "";
+  const ossAccessKeySecret = env.ACCESS_KEY_SECRET?.trim() || "";
+  if (Boolean(ossAccessKeyId) !== Boolean(ossAccessKeySecret)) {
+    throw new SyncError("INVALID_CONFIG", "ACCESS_KEY_ID 与 ACCESS_KEY_SECRET 必须同时配置或同时留空。");
+  }
   const httpToken = env.SYNC_HTTP_TOKEN?.trim() || "";
   if (httpToken && (httpToken.length < 32 || httpToken.length > 256 || !/^[A-Za-z0-9_-]+$/.test(httpToken))) invalid("SYNC_HTTP_TOKEN");
   return {
     apiKey: required(env, "BINANCE_API_KEY"), apiSecret: required(env, "BINANCE_API_SECRET"),
-    baseUrl, symbols, endpoint, region, bucket, prefix,
+    baseUrl, symbols, endpoint, region, bucket, prefix, ossAccessKeyId, ossAccessKeySecret,
     cname: env.OSS_CNAME === "true", httpToken,
     initialDays: integer(env, "SYNC_INITIAL_DAYS", 30, 1, 80),
     overlapMs: integer(env, "SYNC_OVERLAP_SECONDS", 86400, 60, 604800) * 1000,

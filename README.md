@@ -33,13 +33,15 @@
 
 币安 Key 只授予读取所需权限，不授予下单、划转或提现权限。如果设置了 IP 白名单，需要先配置并核实 FC 的固定出网 IP。部署地域不改变账户适用条件，公共行情可达也不代表账户查询可用。
 
-## 2. OSS 和函数角色
+## 2. OSS 和授权
 
 使用北京的**私有、标准存储、从未启用版本控制**的 Bucket。境外 FC 使用公网端点，不能填 `-internal` 端点，也不通过公开网站/CDN提供这些文件。
 
 这里的版本控制限制与同步锁有关：OSS 在版本控制为 Enabled 或 Suspended 时会忽略 `x-oss-forbid-overwrite`。代码会在每次获取锁前查询 Bucket 状态并拒绝这两种情况。**如果现有 Bucket 启用了版本控制，请另选独立 Bucket，不要为了部署此函数修改现有 Bucket 的保护设置。** 不要在同步期间更改 Bucket 的版本控制、保留策略或生命周期规则。
 
-创建 RAM 角色，可信主体选择云服务“函数计算”，绑定到本函数。使用 [examples/ram-policy.json](examples/ram-policy.json) 中的策略，将两处 `YOUR_BUCKET` 替换为实际 Bucket；若调整 `OSS_PREFIX`，同步调整对象资源路径。
+OSS 支持两种凭据来源：配置 FC 环境变量 `ACCESS_KEY_ID` 和 `ACCESS_KEY_SECRET` 时优先使用这对 RAM 用户凭据；两项均未配置时，使用绑定到函数的 RAM 角色临时凭证。只配置其中一项会报错，不会静默切换凭据。
+
+使用 [examples/ram-policy.json](examples/ram-policy.json) 中的策略授权给相应 RAM 用户或角色，将两处 `YOUR_BUCKET` 替换为实际 Bucket；若调整 `OSS_PREFIX`，同步调整对象资源路径。使用角色方式时，可信主体选择云服务“函数计算”，并将角色绑定到本函数。
 
 | 权限 | 范围 / 用途 |
 | --- | --- |
@@ -48,7 +50,7 @@
 | `oss:PutObjectAcl` | 仅同步目录；上传时显式设置对象为 private |
 | `oss:GetBucketVersioning` | 指定 Bucket；检查锁的前提条件 |
 
-不需要 `AliyunOSSFullAccess`、Bucket 列举或阿里云长期 AccessKey。SDK 每次调用从 `context.credentials` 读取 FC 角色临时凭证；没有绑定角色会返回 `FC_ROLE_REQUIRED`。角色与 Bucket 按同一阿里云账号配置；跨账号授权需额外处理，不在此处自动设置。
+不需要 `AliyunOSSFullAccess` 或 Bucket 列举权限。显式 AccessKey 不会混入函数角色的 STS Token；只有两项都留空时，SDK 才从本次调用的 `context.credentials` 读取临时凭证。两种凭据都没有时返回 `FC_ROLE_REQUIRED`。AccessKey 提供身份，相应 RAM 用户仍须获得上述 OSS 授权。示例按同一阿里云账号配置；跨账号授权需额外处理，不在此处自动设置。
 
 ## 3. 环境变量
 
@@ -63,6 +65,15 @@
 | `OSS_BUCKET` | 你的私有 Bucket 名称 | 北京目标 Bucket |
 | `OSS_REGION` | `oss-cn-beijing` | `ali-oss` SDK 格式；**不是首尔地域** |
 | `OSS_ENDPOINT` | `https://oss-cn-beijing.aliyuncs.com` | 北京公网地域端点；不要手工拼入 Bucket 名。若使用已绑定到 Bucket 的自定义域名则配合 `OSS_CNAME=true` |
+
+### 使用 AccessKey 访问 OSS 时追加 2 项
+
+| 名称 | 填写内容 | 说明 |
+| --- | --- | --- |
+| `ACCESS_KEY_ID` | 获得 OSS 授权的 RAM 用户 AccessKey ID | 与下一项成对配置，优先于 FC 角色 |
+| `ACCESS_KEY_SECRET` | 对应 AccessKey Secret | 在 FC 环境变量中配置，不写入代码或请求 |
+
+这两项用于函数运行时访问 OSS，与 GitHub Repository secrets 中用于部署的 `ALIYUN_FC_ACCESS_KEY_ID`、`ALIYUN_FC_ACCESS_KEY_SECRET` 分开配置。不要将真实密钥提交到仓库；工作流会保留控制台已有的环境变量。继续使用函数角色时，将 `ACCESS_KEY_ID` 和 `ACCESS_KEY_SECRET` 同时删除或同时留空。
 
 ### 可选（不填即使用默认值）
 
@@ -109,7 +120,7 @@ Repository secrets 只需要：
 
 工作流使用固定 concurrency group 串行部署，不取消正在执行的更新。每次运行成功后，在 Actions Summary 查看源代码提交、ZIP SHA-256 和 FC 代码 CRC-64。不会输出 FC 环境变量、Secret、完整 API 响应或 SDK 错误堆栈。
 
-币安密钥和 OSS 参数仍按上节配置在 **FC 环境变量** 中，不是上述两个 GitHub Secrets。部署成功只说明代码和配置验证通过；不会在流水线中调用同步业务、访问币安或修改交易记录，首次业务验证按下一节在控制台执行。
+币安密钥、OSS 参数和用于 OSS 的 `ACCESS_KEY_ID`、`ACCESS_KEY_SECRET` 仍按上节配置在 **FC 环境变量** 中，不是上述两个 GitHub Secrets。部署成功只说明代码和配置验证通过；不会在流水线中调用同步业务、访问币安或修改交易记录，首次业务验证按下一节在控制台执行。
 
 ### 本地打包和手工部署
 

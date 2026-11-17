@@ -2,21 +2,30 @@ import { randomUUID } from "node:crypto";
 import { SyncError } from "./errors.js";
 
 function storageError(error) {
-  return new SyncError("OSS_ERROR", "OSS 操作失败，请核对北京公网端点、函数角色权限及网络；已完成分段可重试。", 502,
+  return new SyncError("OSS_ERROR", "OSS 操作失败，请核对北京公网端点、OSS 凭据及授权、网络；已完成分段可重试。", 502,
     typeof error?.code === "string" && /^[A-Za-z0-9]{1,60}$/.test(error.code) ? { ossCode: error.code } : {});
 }
 
 export async function createOssClient(config, context = {}, SDK) {
-  const credentials = context.credentials;
-  if (!credentials?.accessKeyId || !credentials?.accessKeySecret || !credentials?.securityToken) {
-    throw new SyncError("FC_ROLE_REQUIRED", "请为 FC 绑定具有指定 OSS 目录权限的函数角色。", 500);
+  let credentialOptions;
+  if (config.ossAccessKeyId || config.ossAccessKeySecret) {
+    if (!config.ossAccessKeyId || !config.ossAccessKeySecret) {
+      throw new SyncError("INVALID_CONFIG", "ACCESS_KEY_ID 与 ACCESS_KEY_SECRET 必须同时配置或同时留空。");
+    }
+    // Explicit OSS credentials must not be mixed with the FC role's STS token.
+    credentialOptions = { accessKeyId: config.ossAccessKeyId, accessKeySecret: config.ossAccessKeySecret };
+  } else {
+    const credentials = context.credentials;
+    if (!credentials?.accessKeyId || !credentials?.accessKeySecret || !credentials?.securityToken) {
+      throw new SyncError("FC_ROLE_REQUIRED", "请配置 ACCESS_KEY_ID、ACCESS_KEY_SECRET，或绑定具有 OSS 权限的 FC 函数角色。", 500);
+    }
+    credentialOptions = { accessKeyId: credentials.accessKeyId, accessKeySecret: credentials.accessKeySecret, stsToken: credentials.securityToken };
   }
   const OSS = SDK || (await import("ali-oss")).default;
   // Instantiate per invocation; never reuse expired context STS credentials.
   return new OSS({
     region: config.region, endpoint: config.endpoint, bucket: config.bucket, cname: config.cname,
-    accessKeyId: credentials.accessKeyId, accessKeySecret: credentials.accessKeySecret,
-    stsToken: credentials.securityToken, secure: true, timeout: config.requestTimeoutMs,
+    ...credentialOptions, secure: true, timeout: config.requestTimeoutMs,
   });
 }
 
