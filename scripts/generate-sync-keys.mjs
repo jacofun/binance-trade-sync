@@ -16,7 +16,7 @@ const files = {
   "beijing.env.json": {
     BINANCE_SYNC_PRIVATE_KEY: privateKey.export({ type: "pkcs8", format: "pem" }),
     BINANCE_SYNC_KEY_ID: kid, BINANCE_SYNC_ISSUER: issuer, BINANCE_SYNC_AUDIENCE: audience,
-    BINANCE_SYNC_URL: "https://www.yanxiao.me/trade/api",
+    BINANCE_SYNC_URL: "https://yanxiao.me/trade/api",
   },
   "seoul.env.json": { SYNC_JWT_JWKS: JSON.stringify(jwks), SYNC_JWT_ISSUER: issuer, SYNC_JWT_AUDIENCE: audience },
   "public-jwks.json": jwks,

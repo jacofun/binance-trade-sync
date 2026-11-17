@@ -188,9 +188,11 @@ node scripts/generate-sync-keys.mjs
 | `BINANCE_SYNC_KEY_ID` | `trade-sync-v1`，与 JWKS 的 `kid` 一致 |
 | `BINANCE_SYNC_ISSUER` | `https://www.yanxiao.me` |
 | `BINANCE_SYNC_AUDIENCE` | `binance-trade-sync` |
-| `BINANCE_SYNC_URL` | `https://www.yanxiao.me/trade/api`，必须为网站同源 HTTPS 地址 |
+| `BINANCE_SYNC_URL` | `https://yanxiao.me/trade/api`，首尔的 HTTPS 反向代理地址，与北京 API 域名独立 |
 
 首尔新增：`SYNC_JWT_JWKS`（JSON **字符串**）、`SYNC_JWT_ISSUER`、`SYNC_JWT_AUDIENCE`，值见 `seoul.env.json`。原 `BINANCE_*`、`OSS_*`、`ACCESS_KEY_ID`、`ACCESS_KEY_SECRET` 保持原配置，删除旧 `SYNC_HTTP_TOKEN`，HTTP 不再接受 `X-Sync-Token`。
+
+已有北京 FC 的环境变量优先于代码默认值。如果此前设置了带 www 的 `BINANCE_SYNC_URL`，请手工改为 `https://yanxiao.me/trade/api`。不用重新生成密钥；`BINANCE_SYNC_ISSUER` 和首尔 `SYNC_JWT_ISSUER` 保持一致，JWT 签发者标识不要求与同步端点域名相同。
 
 ### 首尔 HTTP 触发器
 
@@ -202,9 +204,9 @@ node scripts/generate-sync-keys.mjs
 
 ### CDN
 
-`https://www.yanxiao.me/trade/api` 回源首尔 HTTP URL，透传 `POST` 方法、JSON 请求体和 `Authorization` Header，回源使用 HTTPS。该路径禁用缓存，响应头保留 `Cache-Control: no-store`，回源超时须覆盖同步运行时间（FC 300 秒）。浏览器设置 310 秒等待，但 CDN 套餐的实际超时上限仍需在控制台核实；如果 CDN 上限更短，长同步会中断响应，应缩短单次同步范围或另行设计异步查询。
+`https://yanxiao.me/trade/api` 回源首尔 HTTP URL，透传 `POST` 方法、JSON 请求体和 `Authorization` Header，回源使用 HTTPS。该路径禁用缓存，响应头保留 `Cache-Control: no-store`，回源超时须覆盖同步运行时间（FC 300 秒）。浏览器设置 310 秒等待，但 CDN 套餐的实际超时上限仍需在控制台核实；如果 CDN 上限更短，长同步会中断响应，应缩短单次同步范围或另行设计异步查询。
 
-这是同源调用，无需把网站 Cookie 的 Path 扩大到 `/trade/api`，也无需首尔 CORS。前端主动设置 `credentials: omit`，只发送当前 JWT，不把网站 Cookie、CSRF、阿里云 AK 或币安密钥发送到首尔。
+页面从 `https://yanxiao.me` 打开时，同步请求为同源，无需首尔 CORS。获取 JWT 的北京接口仍位于 `https://www.yanxiao.me/api/private-auth/`，两个服务的域名无需一致。是否跨域以浏览器页面的 Origin 为准；若页面从 `https://www.yanxiao.me` 打开，请在 CDN/网关处理不携带 JWT 的 OPTIONS 预检，并为实际响应配置允许 www 来源的 CORS（POST 仍验证 JWT），或将网站入口统一到 `https://yanxiao.me`。不要把网站 Cookie 的 Path 扩大到 `/trade/api`。前端主动设置 `credentials: omit`，只发送当前 JWT，不把网站 Cookie、CSRF、阿里云 AK 或币安密钥发送到首尔。
 
 ### 验证和边界
 
@@ -269,3 +271,6 @@ python -m unittest discover -s test -p 'test_deploy_fc.py' -v
 - [FC 3.0 UpdateFunction](https://help.aliyun.com/en/functioncompute/api-fc-2023-03-30-updatefunction)
 - [FC 3.0 代码包参数和 CRC-64](https://help.aliyun.com/en/functioncompute/api-fc-2023-03-30-struct-inputcodelocation)
 - [OSS PutObject 与禁止覆盖限制](https://help.aliyun.com/zh/oss/developer-reference/putobject)
+
+
+浏览器跨域访问须额外处理 CORS；仅更改同步 URL 不会自动更改 FC 触发器/CDN 配置。FC 3.0 的网关 CORS（邀测功能）可处理 OPTIONS 并允许 `https://www.yanxiao.me` 来源、`POST` 方法以及 `Authorization`、`Content-Type` 请求头；`corsConfig.allowMethods` 不包含 OPTIONS。未启用该功能时，应由 CDN/网关返回预检响应，并保留 POST 的 JWT 认证，不能让带 JWT 全部匹配的触发器直接拦截浏览器的无凭证预检。参考 [FC HTTP 触发器 CORS 文档](https://www.alibabacloud.com/help/en/functioncompute/http-triggers-overview)。
