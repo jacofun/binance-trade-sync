@@ -107,6 +107,8 @@ def deploy(client, target, package, *, sleep=time.sleep, now=time.monotonic):
         raise DeployError("Existing runtime/handler differs from s.yaml; deployment stopped before writing.")
     before = snapshot(current)
     checksum = crc64(package)
+    print(json.dumps({"event": "fc_preflight", "state": current.state,
+                      "lastUpdateStatus": current.last_update_status, "expectedCodeChecksum": checksum}), flush=True)
     body = models.UpdateFunctionInput(
         code=models.InputCodeLocation(zip_file=base64.b64encode(package).decode("ascii"), checksum=checksum),
         timeout=target["timeout"],
@@ -116,12 +118,21 @@ def deploy(client, target, package, *, sleep=time.sleep, now=time.monotonic):
         name, models.UpdateFunctionRequest(body=body), {},
         RuntimeOptions(connect_timeout=10000, read_timeout=120000, autoretry=False),
     )
+    print("FC accepted the code update; reading back deployment state.", flush=True)
     deadline = now() + 180
+    previous_status = None
     while now() < deadline:
         deployed = client.get_function(name, models.GetFunctionRequest()).body
+        status = {"state": deployed.state, "lastUpdateStatus": deployed.last_update_status,
+                  "codeChecksum": str(deployed.code_checksum), "checksumMatches": str(deployed.code_checksum) == checksum}
+        if status != previous_status:
+            print(json.dumps({"event": "fc_verification", **status}), flush=True)
+            previous_status = status
         if deployed.state == "Failed" or deployed.last_update_status == "Failed":
             raise DeployError("FC reports a failed update; inspect the FC console for the reason.")
-        if (deployed.state == "Active" and deployed.last_update_status in (None, "", "Successful")
+        # Some ordinary CPU functions omit the container-oriented state fields.
+        # In that case the code checksum and runtime/config readback remain required.
+        if (deployed.state in (None, "", "Active") and deployed.last_update_status in (None, "", "Successful")
                 and str(deployed.code_checksum) == checksum):
             if deployed.runtime != target["runtime"] or deployed.handler != target["handler"] or deployed.timeout != target["timeout"]:
                 raise DeployError("Deployed runtime/handler/timeout verification failed.")
@@ -134,7 +145,7 @@ def deploy(client, target, package, *, sleep=time.sleep, now=time.monotonic):
                 "codeSize": deployed.code_size, "sourceCommit": os.environ.get("GITHUB_SHA", "local"),
             }
         sleep(5)
-    raise DeployError("FC update verification timed out; inspect cloud state before retrying.")
+    raise DeployError("FC update verification timed out; inspect fc_verification status above before retrying.")
 
 
 def main():

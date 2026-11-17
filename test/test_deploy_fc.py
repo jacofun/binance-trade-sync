@@ -17,11 +17,12 @@ spec.loader.exec_module(module)
 
 
 class FakeClient:
-    def __init__(self, *, wrong_runtime=False, change_env=False, failed=False, mismatch=False):
+    def __init__(self, *, wrong_runtime=False, change_env=False, failed=False, mismatch=False, omit_state=False):
         self.wrong_runtime = wrong_runtime
         self.change_env = change_env
         self.failed = failed
         self.mismatch = mismatch
+        self.omit_state = omit_state
         self.updated = False
         self.request = None
 
@@ -38,6 +39,9 @@ class FakeClient:
             role="existing-role", internet_access=True,
             vpc_config=models.VPCConfig(vpc_id="preserved-vpc"),
         )
+        if self.omit_state:
+            function.state = None
+            function.last_update_status = None
         return SimpleNamespace(body=function)
 
     def update_function_with_options(self, name, request, headers, runtime):
@@ -78,6 +82,10 @@ class DeployTests(unittest.TestCase):
     def test_cloud_failure_is_not_reported_as_success(self):
         with self.assertRaisesRegex(module.DeployError, "failed update"):
             module.deploy(FakeClient(failed=True), self.target, b"zip")
+
+    def test_cpu_function_can_omit_container_state_fields_but_still_needs_matching_code(self):
+        result = module.deploy(FakeClient(omit_state=True), self.target, b"zip")
+        self.assertEqual(result["codeChecksum"], module.crc64(b"zip"))
 
     def test_checksum_mismatch_cannot_pass_verification(self):
         ticks = iter([0, 1, 181])
