@@ -99,12 +99,143 @@ def snapshot(function):
     return {key: value_of(getattr(function, key, None)) for key in PRESERVED_FIELDS}
 
 
+def _object(value):
+    if isinstance(value, str):
+        value = json.loads(value)
+    if not isinstance(value, dict):
+        raise ValueError()
+    return {key.lower(): item for key, item in value.items()}
+
+
+def _jwt_policy(auth_type, auth_config):
+    """Inspect policy in memory. Never print the JWKS or returned configuration."""
+    try:
+        if not isinstance(auth_type, str) or auth_type.lower() != "jwt":
+            raise ValueError()
+        policy = _object(auth_config)
+        if set(policy) - {"jwks", "tokenlookup", "claimpassby", "whitelist", "blacklist", "matchmode", "issuer", "issuers", "audience", "audiences"}:
+            raise ValueError()
+        jwks = _object(policy.get("jwks"))
+        keys = jwks.get("keys")
+        if not isinstance(keys, list) or not 1 <= len(keys) <= 5:
+            raise ValueError()
+        for key in keys:
+            if (not isinstance(key, dict) or key.get("kty") != "RSA" or key.get("alg") != "RS256"
+                    or key.get("use") != "sig" or any(name in key for name in ("d", "p", "q", "dp", "dq", "qi", "oth", "k"))):
+                raise ValueError()
+            n = key.get("n", "")
+            if not isinstance(n, str) or not re.fullmatch(r"[A-Za-z0-9_-]+", n):
+                raise ValueError()
+            if int.from_bytes(base64.urlsafe_b64decode(n + "=" * (-len(n) % 4)), "big").bit_length() < 2048:
+                raise ValueError()
+        lookup = policy.get("tokenlookup")
+        if isinstance(lookup, str):
+            parts = lookup.split(":", 2)
+            if len(parts) != 3 or "," in lookup or parts[0].lower() != "header" or parts[1].lower() != "x-jwt-token" or parts[2].strip() != "Bearer":
+                raise ValueError()
+        else:
+            lookup = _object(lookup)
+            if (lookup.get("readposition", "").lower() != "header" or lookup.get("parametername", "").lower() != "x-jwt-token"
+                    or lookup.get("prefix", "").strip() != "Bearer"):
+                raise ValueError()
+        # All analysis aliases must be protected; only exact health exceptions are safe.
+        if policy.get("blacklist"):
+            raise ValueError()
+        whitelist = policy.get("whitelist") or []
+        if not isinstance(whitelist, list):
+            raise ValueError()
+        if any(path not in ("/health", "/trade/api/signal/health") for path in whitelist):
+            raise ValueError()
+        mode = policy.get("matchmode", "all")
+        if not isinstance(mode, str) or mode.lower() not in ("all", "matchall", "match_all", "whitelist"):
+            raise ValueError()
+        if "x-jwt-token" in str(policy.get("claimpassby", "")).lower():
+            raise ValueError()
+        return policy
+    except (ValueError, TypeError, AttributeError, KeyError):
+        try:
+            fields = sorted(_object(auth_config))
+        except (ValueError, TypeError, AttributeError):
+            fields = []
+        raise DeployError("FC ingress must enforce RS256 JWT from X-JWT-Token for all analysis paths; policy fields: " + ", ".join(fields)) from None
+
+
+def audit_native_jwt(client, target):
+    policies = []
+    token = None
+    seen = set()
+    for _ in range(20):
+        page = client.list_triggers(target["functionName"], models.ListTriggersRequest(limit=100, next_token=token)).body
+        for trigger in page.triggers or []:
+            if trigger.trigger_type != "http":
+                continue
+            trigger = client.get_trigger(target["functionName"], trigger.trigger_name).body
+            config = _object(trigger.trigger_config)
+            if config.get("disableurlinternet") is True:
+                continue
+            # The default function URL may be RAM-signature protected while the
+            # CDN origin custom domain uses JWT. This is not an anonymous bypass.
+            if config.get("authtype") == "function":
+                policies.append({"type": "ram-trigger", "name": trigger.trigger_name, "policy": {"authType": "function"}})
+                continue
+            try:
+                policy = _jwt_policy(config.get("authtype"), config.get("authconfig"))
+            except DeployError:
+                print(json.dumps({"event": "native_jwt_policy_unconfirmed", "source": "httpTrigger",
+                                  "authType": config.get("authtype"), "fields": sorted(config),
+                                  "authConfigType": type(config.get("authconfig")).__name__}), flush=True)
+                raise
+            policies.append({"type": "trigger", "name": trigger.trigger_name, "policy": policy})
+        token = page.next_token
+        if not token:
+            break
+        if token in seen:
+            raise DeployError("FC trigger pagination did not complete.")
+        seen.add(token)
+    else:
+        raise DeployError("FC trigger pagination exceeded its bound.")
+    trigger_count = len(policies)
+    token = None
+    seen = set()
+    for _ in range(20):
+        page = client.list_custom_domains(models.ListCustomDomainsRequest(limit=100, next_token=token)).body
+        for domain in page.custom_domains or []:
+            if domain.route_config is None:
+                domain = client.get_custom_domain(domain.domain_name).body
+            routes = (domain.route_config.routes if domain.route_config else []) or []
+            if not any(route.function_name == target["functionName"] for route in routes):
+                continue
+            auth = domain.auth_config
+            policy = _jwt_policy(auth.auth_type if auth else None, auth.auth_info if auth else None)
+            policies.append({"type": "domain", "name": domain.domain_name, "policy": policy})
+        token = page.next_token
+        if not token:
+            break
+        if token in seen:
+            raise DeployError("FC custom-domain pagination did not complete.")
+        seen.add(token)
+    else:
+        raise DeployError("FC custom-domain pagination exceeded its bound.")
+    if not policies:
+        raise DeployError("No protected HTTP ingress was found for the function.")
+    jwt_ready = any(policy["type"] != "ram-trigger" for policy in policies)
+    # A new region can be staged behind RAM authentication before its JWT
+    # custom domain is attached. Never relax an anonymous ingress to do this.
+    print(json.dumps({"event": "native_jwt_verified", "httpTriggers": trigger_count,
+                      "ramProtectedTriggers": sum(policy["type"] == "ram-trigger" for policy in policies),
+                      "customDomains": len(policies) - trigger_count, "jwtIngressReady": jwt_ready}), flush=True)
+    if not jwt_ready:
+        print("Deployment is staged behind RAM authentication. Configure a JWT-protected custom domain before switching CDN traffic.", flush=True)
+    return hashlib.sha256(json.dumps(policies, sort_keys=True).encode()).hexdigest()
+
+
 def deploy(client, target, package, *, sleep=time.sleep, now=time.monotonic):
     name = target["functionName"]
     # Do not create or overwrite a function with an unexpected runtime/handler.
     current = client.get_function(name, models.GetFunctionRequest()).body
     if current.runtime != target["runtime"] or current.handler != target["handler"]:
         raise DeployError("Existing runtime/handler differs from s.yaml; deployment stopped before writing.")
+    ingress_before = audit_native_jwt(client, target)
     before = snapshot(current)
     checksum = crc64(package)
     print(json.dumps({"event": "fc_preflight", "state": current.state,
@@ -138,6 +269,8 @@ def deploy(client, target, package, *, sleep=time.sleep, now=time.monotonic):
                 raise DeployError("Deployed runtime/handler/timeout verification failed.")
             if snapshot(deployed) != before:
                 raise DeployError("FC configuration changed during deployment; inspect the console before continuing.")
+            if audit_native_jwt(client, target) != ingress_before:
+                raise DeployError("FC JWT ingress policy changed during deployment; inspect the console.")
             return {
                 "functionName": name, "region": target["region"], "runtime": deployed.runtime,
                 "handler": deployed.handler, "timeout": deployed.timeout,

@@ -89,9 +89,6 @@ OSS 支持两种凭据来源：配置 FC 环境变量 `ACCESS_KEY_ID` 和 `ACCES
 | `SYNC_MAX_SECONDS` | `240` | 本次执行预算，30～240 秒；FC 超时仍应设 300 秒 |
 | `BINANCE_RECV_WINDOW` | `5000` | 币安签名接收窗口，1000～60000 毫秒；会先校准时间，遇 -1021 只校时重试一次 |
 | `BINANCE_REQUEST_GAP_MS` | `250` | 请求间隔，100～5000 毫秒；遇 429/418 立即停止，遵守返回的等待时间后手工重试 |
-| `SYNC_JWT_JWKS` | 必填（HTTP） | RS256 公钥 JWKS 的 JSON 字符串；缺失或无效时 HTTP 返回 503，控制台事件不受影响 |
-| `SYNC_JWT_ISSUER` | `https://www.yanxiao.me` | 必须与北京签发端一致 |
-| `SYNC_JWT_AUDIENCE` | `binance-trade-sync` | 必须与北京签发端一致 |
 
 如 OSS 账号要求使用自定义域名访问大陆 Bucket，填写已绑定该 Bucket 的 HTTPS 公网域名并设 `OSS_CNAME=true`。不要直接复用仅供原北京函数访问的内网地址。
 
@@ -166,7 +163,7 @@ FC 控制台“配置测试参数”选择自定义 JSON，填写：
 
 请把日期改为实际时间，必须在近 80 天内，结束时间早于服务器当前时间至少 60 秒。支持毫秒时间戳或带时区的 ISO 时间，区间含起止毫秒。显式补查只合并分区，不推进日常同步游标，避免跳过中间缺口；补查期间中断则重发原请求。
 
-迁移说明：当前部署目标为新加坡。已有 `seoul.env.json` 是历史文件名，其中的 JWT 配置仍可复用，无需重新生成密钥。北京 OSS 的 Bucket、地域、目录保持不变；切换流量前需在新加坡完成原生鉴权和 HTTPS 回源配置。
+迁移说明：当前部署目标为新加坡。已有 `public-jwks.json` 继续用于 FC 原生 JWT 配置，无需重新生成密钥。北京 OSS 的 Bucket、地域、目录保持不变；切换流量前需在新加坡完成原生鉴权和 HTTPS 回源配置。
 
 ## 6. 登录后前端直连新加坡
 
@@ -180,7 +177,7 @@ FC 控制台“配置测试参数”选择自定义 JSON，填写：
 node scripts/generate-sync-keys.mjs
 ```
 
-脚本生成 `.local-sync-keys/`，不打印密钥，目录已忽略并禁止覆盖已有目录。`beijing.env.json` 含私钥，只用于北京 FC；`seoul.env.json` 含公钥验证配置，用于新加坡 FC；`public-jwks.json` 用于新加坡 HTTP 触发器。文件中的 JSON 对象是**增量环境变量**，请逐项新增到现有 FC 环境变量，保留原登录和币安/OSS 配置。不要用它们覆盖函数的全部环境变量。工作流只部署代码，不写入这些密钥。
+脚本生成 `.local-sync-keys/`，不打印密钥，目录已忽略并禁止覆盖已有目录。`beijing.env.json` 含私钥，只用于北京 FC；`public-jwks.json` 用于新加坡 FC 原生 JWT 入口。现有部署无需重新生成密钥，也无需为两个业务函数导入 JWT 环境变量。文件中的 JSON 对象是**增量环境变量**，请逐项新增到现有 FC 环境变量，保留原登录和币安/OSS 配置。不要用它们覆盖函数的全部环境变量。工作流只部署代码，不写入这些密钥。
 
 北京需要配置：
 
@@ -192,16 +189,16 @@ node scripts/generate-sync-keys.mjs
 | `BINANCE_SYNC_AUDIENCE` | `binance-trade-sync` |
 | `BINANCE_SYNC_URL` | `https://yanxiao.me/trade/api/sync`，新加坡的 HTTPS 反向代理地址，与北京 API 域名独立 |
 
-新加坡新增：`SYNC_JWT_JWKS`（JSON **字符串**）、`SYNC_JWT_ISSUER`、`SYNC_JWT_AUDIENCE`，值见 `seoul.env.json`。原 `BINANCE_*`、`OSS_*`、`ACCESS_KEY_ID`、`ACCESS_KEY_SECRET` 保持原配置，删除旧 `SYNC_HTTP_TOKEN`，HTTP 不再接受 `X-Sync-Token`。
+新加坡函数不需要 `SYNC_JWT_*` 环境变量；旧值不再读取，可删除。验签和 issuer/audience 策略统一在 FC 原生 JWT 入口维护。原 `BINANCE_*`、`OSS_*`、`ACCESS_KEY_ID`、`ACCESS_KEY_SECRET` 保持原配置，删除旧 `SYNC_HTTP_TOKEN`，HTTP 不再接受 `X-Sync-Token`。
 
-已有北京 FC 的环境变量优先于代码默认值。如果此前显式设置了 `BINANCE_SYNC_URL`，请手工将旧路径改成新路径，推荐值为 `https://yanxiao.me/trade/api/sync`。不用重新生成密钥；`BINANCE_SYNC_ISSUER` 和新加坡 `SYNC_JWT_ISSUER` 保持一致，JWT 签发者标识不要求与同步端点域名相同。
+已有北京 FC 的环境变量优先于代码默认值。如果此前显式设置了 `BINANCE_SYNC_URL`，请手工将旧路径改成新路径，推荐值为 `https://yanxiao.me/trade/api/sync`。不用重新生成密钥；`BINANCE_SYNC_ISSUER` 与 FC 原生 JWT 策略保持一致，JWT 签发者标识不要求与同步端点域名相同。
 
 ### 新加坡 HTTP 触发器
 
 - 业务方法为 `POST`；跨域直达函数的预检需允许 `OPTIONS`。鉴权方式改为 **JWT 认证**，替换原 `function` 签名认证；固定 Bearer 认证与此短期 JWT 方案不兼容。网关须自行处理预检，或允许无 JWT 的 `OPTIONS` 到达函数代码，业务 `POST` 继续鉴权。
 - JWKS 使用生成的 `public-jwks.json` 完整对象，仅含公钥，禁止放入私钥。
 - Token 位置 `Header`，参数名 `X-JWT-Token`，去除前缀为 `Bearer `（包含末尾空格），匹配模式为“全部匹配”。
-- 保留原 `X-JWT-Token` 请求头，不需要将 Claim 映射为用户身份 Header。函数内部再次验证 RS256、`kid`、签发者、受众、`trading:sync` 用途、签发/过期时间和不超过 120 秒的有效期，不信任外部身份 Header。
+- 保留原 `X-JWT-Token` 请求头，不需要将 Claim 映射为用户身份 Header。签名、issuer、audience 统一由 FC 原生 JWT 校验。函数只读取平台已验证的 sub 和过期时间，不再配置或读取 JWT 环境变量。部署脚本检查所有公开 HTTP 入口，拒绝匿名或业务免鉴权配置。
 - 使用 FC 3.0 内置 Node.js 20 HTTP 事件映射；不启动 HTTP Server，不设置监听端口。本仓库工作流不会修改触发器。
 
 ### CDN
@@ -215,7 +212,7 @@ node scripts/generate-sync-keys.mjs
 ### 验证和边界
 
 1. 未登录、CSRF 错误、非 owner、已注销或已撤销会话不能在北京领取凭证。
-2. 新加坡拒绝缺失/篡改/过期/用途错误的 JWT；未配置有效公钥时不会开始同步。控制台 `{ "action": "sync" }` 和受 RAM 授权的 InvokeFunction 事件仍可用。
+2. FC 原生入口拒绝缺失、篡改及过期的 JWT；公钥及声明策略在平台维护。控制台 `{ "action": "sync" }` 和受 RAM 授权的 InvokeFunction 事件仍可用。
 3. 登录后点击“同步币安记录”，只有 HTTP 200 且 `status=completed` 才视为完成，页面显示本次新增条数。
 4. 令牌只存当前请求内存，不写浏览器存储或日志。它在有效期内可重复使用；注销网站会阻止签发新令牌，已签发令牌最多继续有效 120 秒，已开始的同步继续执行。并发同步仍由 OSS 锁控制。
 5. 网络中断或超时后不自动重试；先检查新加坡 FC 日志与 OSS `runs/` 报告。代码不在响应返回后继续后台执行。
@@ -286,18 +283,18 @@ python -m unittest discover -s test -p 'test_deploy_fc.py' -v
 1. 在浏览器 Network 先检查 OPTIONS 是否为 204，再检查实际 POST；预检不携带 JWT，不能用“OPTIONS 没有 X-JWT-Token”判断前端丢失凭证。
 2. 前端从北京 `POST /api/private-auth/trading/binance/token` 获取新的同步专用 JWT，并在 120 秒内发送 `X-JWT-Token: Bearer <token>`。网站登录 Cookie、CSRF、阿里云 AccessKey 都不是此 JWT；浏览器地址栏直接访问发出的是 GET，也不会添加该 Header。
 3. 逐一核对实际回源入口：自定义域名鉴权与 HTTP 触发器鉴权是各自配置的位置。平台 Token 读取位置为 Header，名称为 `X-JWT-Token`（不要使用旧的 `Authorization` 或文档示例的 `Authentication`），去除前缀须与实际 `Bearer ` 及空格一致。若两处都启用 JWT，分别核对。
-4. 北京私钥、新加坡环境变量 `SYNC_JWT_JWKS`、平台 JWKS 必须来自同一对密钥；默认 `kid=trade-sync-v1`，`alg=RS256`。平台填写 `public-jwks.json` 的完整公钥对象，不是 PEM、环境变量外壳或双重 JSON 字符串。
+4. 北京私钥与平台 JWKS 必须来自同一对密钥；默认 `kid=trade-sync-v1`，`alg=RS256`。平台填写 `public-jwks.json` 的完整公钥对象，不是 PEM、环境变量外壳或双重 JSON 字符串。
 5. CDN 透传 X-JWT-Token、POST 和请求体，禁止缓存 `/trade/api/sync` 的所有响应，不做跨域重定向。使用同一份新 JWT 在可信本地工具分别请求真实新加坡入口与 CDN 地址，定位是平台配置还是 CDN 转发；不得把凭证发到第三方回显服务。
 
-诊断时可向两个入口发送 POST 和 `{"action":"auth-check"}`。这个 action 故意不受支持；代码会在启动同步前拒绝，不读写 OSS 或请求币安。返回 `INVALID_REQUEST`（或通过鉴权后的业务配置错误）说明已进入函数并通过本地 JWT 校验；仍返回平台 `JWTTokenIsInvalid` 时继续核对入口 Header/JWKS。不要将 Token、私钥或完整环境变量贴入日志或反馈内容。
+诊断时可向两个入口发送 POST 和 `{"action":"auth-check"}`。这个 action 故意不受支持；代码会在启动同步前拒绝，不读写 OSS 或请求币安。返回 `INVALID_REQUEST`（或通过鉴权后的业务配置错误）说明已进入函数并通过平台 JWT 鉴权；仍返回平台 `JWTTokenIsInvalid` 时继续核对入口 Header/JWKS。不要将 Token、私钥或完整环境变量贴入日志或反馈内容。
 
 
 ### 通用云函数 JWT 约定
 
-网站后续新增的受保护云函数统一使用 `X-JWT-Token: Bearer <JWT>`。此请求头承载完整 JWT；传输、网关读取、本地验证与 CORS 放行必须使用同一名称，Header 名称按 HTTP 规则不区分大小写。旧的 `Authorization` 不再作为业务 JWT 的后备来源；即使 CDN 用它携带 OSS 回源签名，也不会参与业务身份判断。
+网站后续新增的受保护云函数统一使用 `X-JWT-Token: Bearer <JWT>`。此请求头承载完整 JWT；传输、网关读取与 CORS 放行必须使用同一名称，Header 名称按 HTTP 规则不区分大小写。旧的 `Authorization` 不再作为业务 JWT 的后备来源；即使 CDN 用它携带 OSS 回源签名，也不会参与业务身份判断。
 
-签发中心继续使用北京网站现有登录态、CSRF 和权限校验，业务凭证由服务端签发；浏览器只携带短期凭证直连目标函数。私钥只保留在北京，目标函数和 FC 网关只配置公钥，沿用 RS256、kid、JWKS 轮换和最长 120 秒有效期。目标函数仍须验证签名、issuer、audience、scope、iat、exp，拒绝缺失、篡改、过期、用途不符及重复请求头，不信任客户端自行声明的身份。
+签发中心复用北京现有登录态、Origin、CSRF 和 owner 权限。`POST /api/private-auth/trading/binance/token` 签发最长 120 秒的交易凭证，保留原有 `aud=binance-trade-sync`、`scope=trading:sync` 以兼容当前域名策略。同域名的同步与行情分析共用这份凭证及原生 JWT 策略，不增加每个函数的 JWKS、issuer、audience 环境变量。私钥仅留在北京；公钥只配置在 FC 原生入口。新增同信任域能力可继续复用；若未来有不同权限边界，需在原生入口/签发中心设计相应的授权策略。
 
-新增业务需要在北京增加明确的服务端签发路由及权限检查，并为该函数指定独立 audience 和 scope，例如另一服务使用自己的 audience 与 `resources:read`。同一套可信公钥可以复用；币安的 `aud=binance-trade-sync`、`scope=trading:sync` 凭证不能用于其他服务。不要将此币安校验器原样当作所有服务的权限配置，也不要让客户端任意指定 audience、scope 或有效期。
+移除本地验签后，工作流在更新代码前后审计全部公开 HTTP 触发器和匹配自定义域名：允许原生 JWT 或受 RAM 签名保护的管理入口，拒绝匿名及业务路径免鉴权。部署身份除更新函数权限外还需 `fc:ListTriggers`、`fc:GetTrigger`、`fc:ListCustomDomains`、`fc:GetCustomDomain` 只读权限。工作流不修改平台鉴权配置，也不导出或记录公钥配置值。
 
 迁移现有入口时，在前端和新加坡新代码部署后，将 FC 实际回源入口（HTTP 触发器、自定义域名中启用了 JWT 的配置）的 Header 参数名改为 `X-JWT-Token`，去除前缀保留 `Bearer `（末尾一个空格）。已有 JWKS、issuer、audience 和签名密钥沿用；如 CDN/网关另外配置了 CORS，允许请求头必须同步增加 `X-JWT-Token`。工作流只更新代码，不修改这些控制台配置。

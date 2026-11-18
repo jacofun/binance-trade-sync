@@ -1,6 +1,7 @@
 import base64
 import importlib.util
 import io
+import json
 from pathlib import Path
 from types import SimpleNamespace
 import unittest
@@ -17,7 +18,7 @@ spec.loader.exec_module(module)
 
 
 class FakeClient:
-    def __init__(self, *, wrong_runtime=False, change_env=False, failed=False, mismatch=False, omit_state=False):
+    def __init__(self, *, wrong_runtime=False, change_env=False, failed=False, mismatch=False, omit_state=False, policy=None):
         self.wrong_runtime = wrong_runtime
         self.change_env = change_env
         self.failed = failed
@@ -25,6 +26,16 @@ class FakeClient:
         self.omit_state = omit_state
         self.updated = False
         self.request = None
+        self.policy = policy or {"authType": "function"}
+
+    def list_triggers(self, name, request):
+        return SimpleNamespace(body=models.ListTriggersOutput(triggers=[models.Trigger(trigger_type="http", trigger_name="defaultTrigger")]))
+
+    def get_trigger(self, name, trigger_name):
+        return SimpleNamespace(body=models.Trigger(trigger_type="http", trigger_name=trigger_name, trigger_config=json.dumps(self.policy)))
+
+    def list_custom_domains(self, request):
+        return SimpleNamespace(body=models.ListCustomDomainOutput(custom_domains=[]))
 
     def get_function(self, name, request):
         env = {"BINANCE_API_SECRET": "must-remain-private", "OSS_BUCKET": "existing-bucket"}
@@ -101,6 +112,22 @@ class DeployTests(unittest.TestCase):
         step = workflow["jobs"]["deploy"]["steps"][-1]
         self.assertEqual(set(step["env"]), {"ALIYUN_FC_ACCESS_KEY_ID", "ALIYUN_FC_ACCESS_KEY_SECRET"})
         self.assertIn("steps.current.outputs.deploy", step["if"])
+
+    def test_anonymous_ingress_cannot_deploy_without_local_jwks(self):
+        client = FakeClient(policy={"authType": "anonymous"})
+        with self.assertRaises(module.DeployError):
+            module.deploy(client, self.target, b"zip")
+        self.assertFalse(client.updated)
+
+    def test_native_jwt_must_read_only_the_shared_header_without_business_bypasses(self):
+        modulus = base64.urlsafe_b64encode(bytes([128]) + bytes([1]) * 255).decode().rstrip("=")
+        policy = {"jwks": {"keys": [{"kty": "RSA", "alg": "RS256", "use": "sig", "e": "AQAB", "n": modulus}]},
+                  "tokenLookup": "header:X-JWT-Token:Bearer "}
+        self.assertTrue(module._jwt_policy("jwt", policy))
+        for change in [{"whitelist": ["/trade/api/sync"]}, {"blacklist": ["/trade/api/sync"]},
+                       {"tokenLookup": "header:Authorization:Bearer "}]:
+            with self.assertRaises(module.DeployError):
+                module._jwt_policy("jwt", {**policy, **change})
 
     def test_zip_requires_dependencies_and_rejects_secret_files(self):
         with tempfile.TemporaryDirectory() as directory:

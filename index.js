@@ -45,7 +45,7 @@ export function makeHandler({ env = process.env, run = synchronize, logger = con
         cors = corsHeaders(input.headers);
         if (input.requestContext.http.method === "OPTIONS") return preflight(input.headers, cors);
         if (input.requestContext.http.method !== "POST") throw new SyncError("METHOD_NOT_ALLOWED", "只支持 POST 请求。", 405);
-        authorize(input.headers, env);
+        authorize(input.headers);
         if (typeof input.body !== "string" || input.body.length > 16384) throw new SyncError("INVALID_REQUEST", "HTTP 请求体无效或过大。", 400);
         body = decode(input.isBase64Encoded ? Buffer.from(input.body, "base64").toString("utf8") : input.body);
       }
