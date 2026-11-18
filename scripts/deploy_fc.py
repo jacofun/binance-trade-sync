@@ -116,7 +116,7 @@ def deploy(client, target, package, *, sleep=time.sleep, now=time.monotonic):
     # Deliberately omit environmentVariables, role and all other properties.
     client.update_function_with_options(
         name, models.UpdateFunctionRequest(body=body), {},
-        RuntimeOptions(connect_timeout=10000, read_timeout=120000, autoretry=False),
+        RuntimeOptions(connect_timeout=60000, read_timeout=180000, autoretry=False),
     )
     print("FC accepted the code update; reading back deployment state.", flush=True)
     deadline = now() + 180
@@ -156,7 +156,7 @@ def main():
     if not all(credentials):
         raise DeployError("Configure Repository secrets ALIYUN_FC_ACCESS_KEY_ID and ALIYUN_FC_ACCESS_KEY_SECRET.")
     config = Config(access_key_id=credentials[0], access_key_secret=credentials[1],
-                    endpoint=f"fcv3.{target['region']}.aliyuncs.com", connect_timeout=10000, read_timeout=120000)
+                    endpoint=f"fcv3.{target['region']}.aliyuncs.com", connect_timeout=60000, read_timeout=180000)
     print(f"Deploying {target['functionName']} in {target['region']}; updating code and timeout only.")
     result = deploy(Client(config), target, package)
     (root / "dist/deploy-result.json").write_text(json.dumps(result, indent=2) + "\n")
@@ -179,5 +179,12 @@ if __name__ == "__main__":
         # Alibaba SDK exceptions can contain request bodies, signed URLs or envs.
         code = getattr(error, "code", "")
         code = code if isinstance(code, str) and re.fullmatch(r"[A-Za-z0-9_.-]{1,80}", code) else type(error).__name__
-        print(f"Deployment failed ({code}); check FC permissions and GitHub Actions network access.", file=sys.stderr)
+        causes = []
+        for name in ("inner_exception", "cause", "last_exception", "__cause__"):
+            value = getattr(error, name, None)
+            if value is not None:
+                causes.append(type(value).__name__)
+        text = str(error).lower()
+        hints = [name for name in ("timeout", "timed out", "connection reset", "connection refused", "broken pipe", "name resolution") if name in text]
+        print(f"Deployment failed ({code}); cause types: {','.join(causes) or 'unavailable'}; network hints: {','.join(hints) or 'none'}. Check FC permissions and GitHub Actions network access.", file=sys.stderr)
         sys.exit(1)
