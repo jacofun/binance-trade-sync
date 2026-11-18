@@ -9,7 +9,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: deploy-fc-ap-northeast-2-binance-trade-sync
+  group: deploy-fc-ap-southeast-1-binance-trade-sync
   cancel-in-progress: false
 
 jobs:
