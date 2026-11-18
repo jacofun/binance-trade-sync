@@ -138,13 +138,14 @@ def _jwt_policy(auth_type, auth_config):
             if (lookup.get("readposition", "").lower() != "header" or lookup.get("parametername", "").lower() != "x-jwt-token"
                     or lookup.get("prefix", "").strip() != "Bearer"):
                 raise ValueError()
-        # All analysis aliases must be protected; only exact health exceptions are safe.
+        # This managed sync handler accepts actions independent of path. It has
+        # no public health route, so every HTTP path must remain JWT protected.
         if policy.get("blacklist"):
             raise ValueError()
         whitelist = policy.get("whitelist") or []
         if not isinstance(whitelist, list):
             raise ValueError()
-        if any(path not in ("/health", "/trade/api/signal/health") for path in whitelist):
+        if whitelist:
             raise ValueError()
         mode = policy.get("matchmode", "all")
         if not isinstance(mode, str) or mode.lower() not in ("all", "matchall", "match_all", "whitelist"):
@@ -157,7 +158,7 @@ def _jwt_policy(auth_type, auth_config):
             fields = sorted(_object(auth_config))
         except (ValueError, TypeError, AttributeError):
             fields = []
-        raise DeployError("FC ingress must enforce RS256 JWT from X-JWT-Token for all analysis paths; policy fields: " + ", ".join(fields)) from None
+        raise DeployError("FC ingress must enforce RS256 JWT from X-JWT-Token for all sync paths; policy fields: " + ", ".join(fields)) from None
 
 
 def audit_native_jwt(client, target):

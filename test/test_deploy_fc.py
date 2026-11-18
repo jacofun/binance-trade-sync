@@ -124,7 +124,7 @@ class DeployTests(unittest.TestCase):
         policy = {"jwks": {"keys": [{"kty": "RSA", "alg": "RS256", "use": "sig", "e": "AQAB", "n": modulus}]},
                   "tokenLookup": "header:X-JWT-Token:Bearer "}
         self.assertTrue(module._jwt_policy("jwt", policy))
-        for change in [{"whitelist": ["/trade/api/sync"]}, {"blacklist": ["/trade/api/sync"]},
+        for change in [{"whitelist": ["/health"]}, {"whitelist": ["/trade/api/signal/health"]}, {"whitelist": ["/trade/api/sync"]}, {"blacklist": ["/trade/api/sync"]},
                        {"tokenLookup": "header:Authorization:Bearer "}]:
             with self.assertRaises(module.DeployError):
                 module._jwt_policy("jwt", {**policy, **change})
