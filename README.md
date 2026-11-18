@@ -196,7 +196,7 @@ node scripts/generate-sync-keys.mjs
 
 ### 首尔 HTTP 触发器
 
-- 方法仅 `POST`，鉴权方式改为 **JWT 认证**，替换原 `function` 签名认证；固定 Bearer 认证与此短期 JWT 方案不兼容。
+- 业务方法为 `POST`；跨域直达函数的预检需允许 `OPTIONS`。鉴权方式改为 **JWT 认证**，替换原 `function` 签名认证；固定 Bearer 认证与此短期 JWT 方案不兼容。网关须自行处理预检，或允许无 JWT 的 `OPTIONS` 到达函数代码，业务 `POST` 继续鉴权。
 - JWKS 使用生成的 `public-jwks.json` 完整对象，仅含公钥，禁止放入私钥。
 - Token 位置 `Header`，参数名 `Authorization`，去除前缀为 `Bearer `（包含末尾空格），匹配模式为“全部匹配”。
 - 保留原 `Authorization` 请求头，不需要将 Claim 映射为用户身份 Header。函数内部再次验证 RS256、`kid`、签发者、受众、`trading:sync` 用途、签发/过期时间和不超过 120 秒的有效期，不信任外部身份 Header。
@@ -206,7 +206,7 @@ node scripts/generate-sync-keys.mjs
 
 `https://yanxiao.me/trade/api` 回源首尔 HTTP URL，透传 `POST` 方法、JSON 请求体和 `Authorization` Header，回源使用 HTTPS。该路径禁用缓存，响应头保留 `Cache-Control: no-store`，回源超时须覆盖同步运行时间（FC 300 秒）。浏览器设置 310 秒等待，但 CDN 套餐的实际超时上限仍需在控制台核实；如果 CDN 上限更短，长同步会中断响应，应缩短单次同步范围或另行设计异步查询。
 
-页面从 `https://yanxiao.me` 打开时，同步请求为同源，无需首尔 CORS。获取 JWT 的北京接口仍位于 `https://www.yanxiao.me/api/private-auth/`，两个服务的域名无需一致。是否跨域以浏览器页面的 Origin 为准；若页面从 `https://www.yanxiao.me` 打开，请在 CDN/网关处理不携带 JWT 的 OPTIONS 预检，并为实际响应配置允许 www 来源的 CORS（POST 仍验证 JWT），或将网站入口统一到 `https://yanxiao.me`。不要把网站 Cookie 的 Path 扩大到 `/trade/api`。前端主动设置 `credentials: omit`，只发送当前 JWT，不把网站 Cookie、CSRF、阿里云 AK 或币安密钥发送到首尔。
+页面从 `https://yanxiao.me` 打开时，同步请求为同源，无需首尔 CORS。获取 JWT 的北京接口仍位于 `https://www.yanxiao.me/api/private-auth/`，两个服务的域名无需一致。是否跨域以浏览器页面的 Origin 为准；若页面从 `https://www.yanxiao.me` 打开，浏览器会先发送无 JWT 的 OPTIONS 预检。函数代码对这两个精确站点来源、请求方法 POST 和 Authorization/Content-Type/Accept 请求头的预检返回空体 204，不加载业务配置、不访问币安或 OSS。其他预检返回 403；实际 POST 的成功和错误响应均附带受信来源的 CORS 响应头，POST 的 JWT 校验保持不变。CDN/网关也须允许预检到达代码，或直接返回等价的预检响应；不能在代码之前因缺失 JWT 将 OPTIONS 拦截。不要把网站 Cookie 的 Path 扩大到 `/trade/api`。前端主动设置 `credentials: omit`，只发送当前 JWT，不把网站 Cookie、CSRF、阿里云 AK 或币安密钥发送到首尔。
 
 ### 验证和边界
 
@@ -273,4 +273,16 @@ python -m unittest discover -s test -p 'test_deploy_fc.py' -v
 - [OSS PutObject 与禁止覆盖限制](https://help.aliyun.com/zh/oss/developer-reference/putobject)
 
 
-浏览器跨域访问须额外处理 CORS；仅更改同步 URL 不会自动更改 FC 触发器/CDN 配置。FC 3.0 的网关 CORS（邀测功能）可处理 OPTIONS 并允许 `https://www.yanxiao.me` 来源、`POST` 方法以及 `Authorization`、`Content-Type` 请求头；`corsConfig.allowMethods` 不包含 OPTIONS。未启用该功能时，应由 CDN/网关返回预检响应，并保留 POST 的 JWT 认证，不能让带 JWT 全部匹配的触发器直接拦截浏览器的无凭证预检。参考 [FC HTTP 触发器 CORS 文档](https://www.alibabacloud.com/help/en/functioncompute/http-triggers-overview)。
+浏览器跨域访问须处理 CORS；仅更改同步 URL 不会自动更改 FC 触发器/CDN 配置。FC 3.0 的网关 CORS 可处理 OPTIONS 并允许 `https://www.yanxiao.me` 来源、`POST` 方法以及 `Authorization`、`Content-Type` 请求头；`corsConfig.allowMethods` 不包含 OPTIONS。代码已支持预检，但网关必须先允许其到达代码，或在网关直接完成预检。参考 [FC HTTP 触发器 CORS 文档](https://www.alibabacloud.com/help/en/functioncompute/http-triggers-overview)。
+
+### 定位 JWTTokenIsInvalid
+
+`{"Code":"JWTTokenIsInvalid","Message":"invalid or expired jwt"}` 来自 FC 平台鉴权层；代码中的鉴权失败格式为 `{"error":{"code":"UNAUTHORIZED",...}}`。平台层拒绝时，请求尚未进入本函数，修改 `SYNC_JWT_ISSUER` 等环境变量不能修复平台的 Header/JWKS 配置。
+
+1. 在浏览器 Network 先检查 OPTIONS 是否为 204，再检查实际 POST；预检不携带 JWT，不能用“OPTIONS 没有 Authorization”判断前端丢失凭证。
+2. 前端从北京 `POST /api/private-auth/trading/binance/token` 获取新的同步专用 JWT，并在 120 秒内发送 `Authorization: Bearer <token>`。网站登录 Cookie、CSRF、阿里云 AccessKey 都不是此 JWT；浏览器地址栏直接访问发出的是 GET，也不会添加该 Header。
+3. 逐一核对实际回源入口：自定义域名鉴权与 HTTP 触发器鉴权是各自配置的位置。平台 Token 读取位置为 Header，名称为 `Authorization`（不要照文档示例填 `Authentication`），去除前缀须与实际 `Bearer ` 及空格一致。若两处都启用 JWT，分别核对。
+4. 北京私钥、首尔环境变量 `SYNC_JWT_JWKS`、平台 JWKS 必须来自同一对密钥；默认 `kid=trade-sync-v1`，`alg=RS256`。平台填写 `public-jwks.json` 的完整公钥对象，不是 PEM、环境变量外壳或双重 JSON 字符串。
+5. CDN 透传 Authorization、POST 和请求体，禁止缓存 `/trade/api` 的所有响应，不做跨域重定向。使用同一份新 JWT 在可信本地工具分别请求真实首尔入口与 CDN 地址，定位是平台配置还是 CDN 转发；不得把凭证发到第三方回显服务。
+
+诊断时可向两个入口发送 POST 和 `{"action":"auth-check"}`。这个 action 故意不受支持；代码会在启动同步前拒绝，不读写 OSS 或请求币安。返回 `INVALID_REQUEST`（或通过鉴权后的业务配置错误）说明已进入函数并通过本地 JWT 校验；仍返回平台 `JWTTokenIsInvalid` 时继续核对入口 Header/JWKS。不要将 Token、私钥或完整环境变量贴入日志或反馈内容。

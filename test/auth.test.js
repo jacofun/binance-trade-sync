@@ -64,3 +64,40 @@ test("HTTP rejects unauthenticated requests before config/network; console event
   assert.equal((await consoleHandler({ action: "sync" })).requestId, "test");
   assert.equal(runs, 2);
 });
+
+test("CORS preflight needs no JWT or configuration and cannot start sync", async () => {
+  let runs = 0;
+  const handler = makeHandler({ env: {}, logger: { info() {}, error() {} }, run: async () => { runs++; } });
+  const event = (overrides = {}) => ({ requestContext: { http: { method: "OPTIONS" } }, headers: {
+    origin: "https://www.yanxiao.me", "access-control-request-method": "POST",
+    "access-control-request-headers": "authorization, content-type", ...overrides,
+  } });
+  for (const origin of ["https://www.yanxiao.me", "https://yanxiao.me"]) {
+    const result = await handler(event({ origin }));
+    assert.equal(result.statusCode, 204);
+    assert.equal(result.body, "");
+    assert.equal(result.headers["Access-Control-Allow-Origin"], origin);
+    assert.equal(result.headers["Access-Control-Allow-Methods"], "POST");
+    assert.match(result.headers["Access-Control-Allow-Headers"], /Authorization/);
+    assert.equal(result.headers.Vary, "Origin");
+    assert.equal(result.headers["Access-Control-Allow-Credentials"], undefined);
+  }
+  for (const overrides of [{ origin: "https://evil.test" }, { origin: "null" }, { origin: "" },
+    { "access-control-request-method": "DELETE" }, { "access-control-request-headers": "x-admin" }]) {
+    assert.equal((await handler(event(overrides))).statusCode, 403);
+  }
+  const post = await handler({ requestContext: { http: { method: "POST" } },
+    headers: { origin: "https://www.yanxiao.me" }, body: '{"action":"sync"}' });
+  assert.equal(post.statusCode, 503); // Missing trusted keys still fails closed after preflight.
+  assert.equal(JSON.parse(post.body).error.code, "JWT_NOT_CONFIGURED");
+  assert.equal(post.headers["Access-Control-Allow-Origin"], "https://www.yanxiao.me");
+  const protectedHandler = makeHandler({ env, logger: { info() {}, error() {} }, run: async () => { runs++; } });
+  for (const auth of [{}, { authorization: "Bearer diagnostic.invalid.token" }]) {
+    const denied = await protectedHandler({ requestContext: { http: { method: "POST" } },
+      headers: { origin: "https://www.yanxiao.me", ...auth }, body: '{"action":"sync"}' });
+    assert.equal(denied.statusCode, 401);
+    assert.equal(JSON.parse(denied.body).error.code, "UNAUTHORIZED");
+    assert.equal(denied.headers["Access-Control-Allow-Origin"], "https://www.yanxiao.me");
+  }
+  assert.equal(runs, 0);
+});
