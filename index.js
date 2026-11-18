@@ -1,10 +1,10 @@
-import { authorize } from "./src/auth.js";
+import { authorize, JWT_TOKEN_HEADER } from "./src/auth.js";
 import { loadConfig, parseRequest } from "./src/config.js";
 import { synchronize } from "./src/sync.js";
 import { SyncError, safeError } from "./src/errors.js";
 
 const CORS_ORIGINS = new Set(["https://yanxiao.me", "https://www.yanxiao.me"]);
-const CORS_REQUEST_HEADERS = new Set(["authorization", "content-type", "accept"]);
+const CORS_REQUEST_HEADERS = new Set([JWT_TOKEN_HEADER.toLowerCase(), "content-type", "accept"]);
 function header(headers, name) {
   const values = Object.entries(headers || {}).filter(([key]) => key.toLowerCase() === name);
   return values.length === 1 && typeof values[0][1] === "string" ? values[0][1] : "";
@@ -21,7 +21,7 @@ function preflight(headers, cors) {
   }
   // A browser preflight carries no JWT and must never load credentials or run sync.
   return response(204, null, { ...cors, "Access-Control-Allow-Methods": "POST",
-    "Access-Control-Allow-Headers": "Authorization, Content-Type, Accept" });
+    "Access-Control-Allow-Headers": `${JWT_TOKEN_HEADER}, Content-Type, Accept` });
 }
 
 function decode(value) {

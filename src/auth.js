@@ -1,6 +1,8 @@
 import { createPublicKey, verify } from "node:crypto";
 import { SyncError } from "./errors.js";
 
+export const JWT_TOKEN_HEADER = "X-JWT-Token";
+
 const denied = () => new SyncError("UNAUTHORIZED", "同步凭证无效或已过期，请重新点击同步。", 401);
 const configurationError = () => new SyncError("JWT_NOT_CONFIGURED", "HTTP 同步尚未配置有效的 SYNC_JWT_JWKS。", 503);
 
@@ -35,7 +37,7 @@ function decode(part) {
 export function authorize(headers, env, nowSeconds = Math.floor(Date.now() / 1000)) {
   const keys = publicKeys(env);
   try {
-    const entries = Object.entries(headers || {}).filter(([key]) => key.toLowerCase() === "authorization");
+    const entries = Object.entries(headers || {}).filter(([key]) => key.toLowerCase() === JWT_TOKEN_HEADER.toLowerCase());
     const auth = entries.length === 1 ? entries[0][1] : null;
     if (typeof auth !== "string" || auth.length > 8192 || !/^Bearer [^ ]+$/i.test(auth)) throw denied();
     const parts = auth.slice(7).split(".");

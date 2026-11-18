@@ -16,7 +16,7 @@ function token(delta = {}, headerDelta = {}, signingKey = privateKey) {
   const data = `${header}.${payload}`;
   return `${data}.${sign("RSA-SHA256", Buffer.from(data), signingKey).toString("base64url")}`;
 }
-const headers = value => ({ Authorization: `Bearer ${value}` });
+const headers = value => ({ "X-JWT-Token": `Bearer ${value}` });
 
 test("RS256 verifies the trusted key, issuer, audience, scope and short lifetime", () => {
   assert.equal(authorize(headers(token()), env, NOW).sub, "owner");
@@ -30,7 +30,19 @@ test("RS256 verifies the trusted key, issuer, audience, scope and short lifetime
     token({}, { jku: "https://evil.test/jwks" }), token({}, { crit: ["b64"] }), "not-a-jwt", token() + "=",
   ]) assert.throws(() => authorize(headers(value), env, NOW), { code: "UNAUTHORIZED" });
   assert.throws(() => authorize({ "X-Sync-Token": "old-secret", "X-User-Role": "owner" }, env, NOW), { code: "UNAUTHORIZED" });
-  assert.throws(() => authorize({ ...headers(token()), authorization: `Bearer ${token()}` }, env, NOW), { code: "UNAUTHORIZED" });
+  assert.throws(() => authorize({ ...headers(token()), "x-jwt-token": `Bearer ${token()}` }, env, NOW), { code: "UNAUTHORIZED" });
+});
+
+test("dedicated JWT header is independent of CDN Authorization and never falls back to it", () => {
+  const valid = token();
+  assert.equal(authorize({ ...headers(valid), Authorization: "OSS cdn-origin-signature" }, env, NOW).sub, "owner");
+  assert.equal(authorize({ "x-jwt-token": `Bearer ${valid}` }, env, NOW).sub, "owner");
+  for (const input of [{ Authorization: `Bearer ${valid}` },
+    { ...headers("invalid"), Authorization: `Bearer ${valid}` },
+    { "X-JWT-Token": [valid, valid] }, { "X-JWT-Token": valid },
+    { "X-JWT-Token": `Bearer ${valid}, Bearer ${valid}` }]) {
+    assert.throws(() => authorize(input, env, NOW), { code: "UNAUTHORIZED" });
+  }
 });
 
 test("missing, private, duplicate or weak verification keys fail closed", () => {
@@ -70,7 +82,7 @@ test("CORS preflight needs no JWT or configuration and cannot start sync", async
   const handler = makeHandler({ env: {}, logger: { info() {}, error() {} }, run: async () => { runs++; } });
   const event = (overrides = {}) => ({ requestContext: { http: { method: "OPTIONS" } }, headers: {
     origin: "https://www.yanxiao.me", "access-control-request-method": "POST",
-    "access-control-request-headers": "authorization, content-type", ...overrides,
+    "access-control-request-headers": "x-jwt-token, content-type", ...overrides,
   } });
   for (const origin of ["https://www.yanxiao.me", "https://yanxiao.me"]) {
     const result = await handler(event({ origin }));
@@ -78,7 +90,7 @@ test("CORS preflight needs no JWT or configuration and cannot start sync", async
     assert.equal(result.body, "");
     assert.equal(result.headers["Access-Control-Allow-Origin"], origin);
     assert.equal(result.headers["Access-Control-Allow-Methods"], "POST");
-    assert.match(result.headers["Access-Control-Allow-Headers"], /Authorization/);
+    assert.match(result.headers["Access-Control-Allow-Headers"], /X-JWT-Token/);
     assert.equal(result.headers.Vary, "Origin");
     assert.equal(result.headers["Access-Control-Allow-Credentials"], undefined);
   }
@@ -92,7 +104,7 @@ test("CORS preflight needs no JWT or configuration and cannot start sync", async
   assert.equal(JSON.parse(post.body).error.code, "JWT_NOT_CONFIGURED");
   assert.equal(post.headers["Access-Control-Allow-Origin"], "https://www.yanxiao.me");
   const protectedHandler = makeHandler({ env, logger: { info() {}, error() {} }, run: async () => { runs++; } });
-  for (const auth of [{}, { authorization: "Bearer diagnostic.invalid.token" }]) {
+  for (const auth of [{}, { "x-jwt-token": "Bearer diagnostic.invalid.token" }]) {
     const denied = await protectedHandler({ requestContext: { http: { method: "POST" } },
       headers: { origin: "https://www.yanxiao.me", ...auth }, body: '{"action":"sync"}' });
     assert.equal(denied.statusCode, 401);
