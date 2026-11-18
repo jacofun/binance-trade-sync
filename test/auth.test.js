@@ -67,6 +67,7 @@ test("HTTP rejects unauthenticated requests before config/network; console event
   assert.equal((await handler(event())).statusCode, 401);
   assert.equal(runs, 0);
   const good = event("POST", headers(token({ iat: Math.floor(Date.now() / 1000), exp: Math.floor(Date.now() / 1000) + 120 })));
+  good.rawPath = "/trade/api/sync";
   good.isBase64Encoded = true;
   good.body = Buffer.from(good.body).toString("base64");
   assert.equal((await handler(Buffer.from(JSON.stringify(good)))).statusCode, 200);
@@ -80,7 +81,7 @@ test("HTTP rejects unauthenticated requests before config/network; console event
 test("CORS preflight needs no JWT or configuration and cannot start sync", async () => {
   let runs = 0;
   const handler = makeHandler({ env: {}, logger: { info() {}, error() {} }, run: async () => { runs++; } });
-  const event = (overrides = {}) => ({ requestContext: { http: { method: "OPTIONS" } }, headers: {
+  const event = (overrides = {}) => ({ rawPath: "/trade/api/sync", requestContext: { http: { method: "OPTIONS" } }, headers: {
     origin: "https://www.yanxiao.me", "access-control-request-method": "POST",
     "access-control-request-headers": "x-jwt-token, content-type", ...overrides,
   } });

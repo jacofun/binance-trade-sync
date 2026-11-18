@@ -168,7 +168,7 @@ FC 控制台“配置测试参数”选择自定义 JSON，填写：
 
 ## 6. 登录后前端直连首尔
 
-调用链为：前端携带网站 Cookie 与 CSRF → 北京 `POST /api/private-auth/trading/binance/token` → 获得 120 秒 JWT → 前端 `POST /trade/api` → CDN 转发首尔。只有现有登录系统中的 `owner` 可以领取凭证，北京不转发同步请求。前端请求体固定为 `{"action":"sync"}`；原始成交和资金流水仍独立保存，不自动生成网站日志或统计。
+调用链为：前端携带网站 Cookie 与 CSRF → 北京 `POST /api/private-auth/trading/binance/token` → 获得 120 秒 JWT → 前端 `POST /trade/api/sync` → CDN 转发首尔。只有现有登录系统中的 `owner` 可以领取凭证，北京不转发同步请求。前端请求体固定为 `{"action":"sync"}`；原始成交和资金流水仍独立保存，不自动生成网站日志或统计。
 
 ### 生成密钥和配置两端
 
@@ -188,11 +188,11 @@ node scripts/generate-sync-keys.mjs
 | `BINANCE_SYNC_KEY_ID` | `trade-sync-v1`，与 JWKS 的 `kid` 一致 |
 | `BINANCE_SYNC_ISSUER` | `https://www.yanxiao.me` |
 | `BINANCE_SYNC_AUDIENCE` | `binance-trade-sync` |
-| `BINANCE_SYNC_URL` | `https://yanxiao.me/trade/api`，首尔的 HTTPS 反向代理地址，与北京 API 域名独立 |
+| `BINANCE_SYNC_URL` | `https://yanxiao.me/trade/api/sync`，首尔的 HTTPS 反向代理地址，与北京 API 域名独立 |
 
 首尔新增：`SYNC_JWT_JWKS`（JSON **字符串**）、`SYNC_JWT_ISSUER`、`SYNC_JWT_AUDIENCE`，值见 `seoul.env.json`。原 `BINANCE_*`、`OSS_*`、`ACCESS_KEY_ID`、`ACCESS_KEY_SECRET` 保持原配置，删除旧 `SYNC_HTTP_TOKEN`，HTTP 不再接受 `X-Sync-Token`。
 
-已有北京 FC 的环境变量优先于代码默认值。如果此前设置了带 www 的 `BINANCE_SYNC_URL`，请手工改为 `https://yanxiao.me/trade/api`。不用重新生成密钥；`BINANCE_SYNC_ISSUER` 和首尔 `SYNC_JWT_ISSUER` 保持一致，JWT 签发者标识不要求与同步端点域名相同。
+已有北京 FC 的环境变量优先于代码默认值。如果此前显式设置了 `BINANCE_SYNC_URL`，请手工将旧路径改成新路径，推荐值为 `https://yanxiao.me/trade/api/sync`。不用重新生成密钥；`BINANCE_SYNC_ISSUER` 和首尔 `SYNC_JWT_ISSUER` 保持一致，JWT 签发者标识不要求与同步端点域名相同。
 
 ### 首尔 HTTP 触发器
 
@@ -204,9 +204,11 @@ node scripts/generate-sync-keys.mjs
 
 ### CDN
 
-`https://yanxiao.me/trade/api` 回源首尔 HTTP URL，透传 `POST` 方法、JSON 请求体和 `X-JWT-Token` Header，回源使用 HTTPS。该路径禁用缓存，响应头保留 `Cache-Control: no-store`，回源超时须覆盖同步运行时间（FC 300 秒）。浏览器设置 310 秒等待，但 CDN 套餐的实际超时上限仍需在控制台核实；如果 CDN 上限更短，长同步会中断响应，应缩短单次同步范围或另行设计异步查询。
+同步入口从 `/trade/api` 调整为 `/trade/api/sync`。需要在 CDN 中为新路径配置回源规则；确认新入口生效后移除旧同步规则，避免将未来其他 `/trade/api/*` 接口转发到同步函数。首尔处理器不依赖外部路径，CDN 可保留该路径或重写为函数根路径 `/`，无需新增首尔路径环境变量。北京网站函数显式配置的 `BINANCE_SYNC_URL` 需同步更新。
 
-页面从 `https://yanxiao.me` 打开时，同步请求为同源，无需首尔 CORS。获取 JWT 的北京接口仍位于 `https://www.yanxiao.me/api/private-auth/`，两个服务的域名无需一致。是否跨域以浏览器页面的 Origin 为准；若页面从 `https://www.yanxiao.me` 打开，浏览器会先发送无 JWT 的 OPTIONS 预检。函数代码对这两个精确站点来源、请求方法 POST 和 X-JWT-Token/Content-Type/Accept 请求头的预检返回空体 204，不加载业务配置、不访问币安或 OSS。其他预检返回 403；实际 POST 的成功和错误响应均附带受信来源的 CORS 响应头，POST 的 JWT 校验保持不变。CDN/网关也须允许预检到达代码，或直接返回等价的预检响应；不能在代码之前因缺失 JWT 将 OPTIONS 拦截。不要把网站 Cookie 的 Path 扩大到 `/trade/api`。前端主动设置 `credentials: omit`，只发送当前 JWT，不把网站 Cookie、CSRF、阿里云 AK 或币安密钥发送到首尔。
+`https://yanxiao.me/trade/api/sync` 回源首尔 HTTP URL，透传 `POST` 方法、JSON 请求体和 `X-JWT-Token` Header，回源使用 HTTPS。该路径禁用缓存，响应头保留 `Cache-Control: no-store`，回源超时须覆盖同步运行时间（FC 300 秒）。浏览器设置 310 秒等待，但 CDN 套餐的实际超时上限仍需在控制台核实；如果 CDN 上限更短，长同步会中断响应，应缩短单次同步范围或另行设计异步查询。
+
+页面从 `https://yanxiao.me` 打开时，同步请求为同源，无需首尔 CORS。获取 JWT 的北京接口仍位于 `https://www.yanxiao.me/api/private-auth/`，两个服务的域名无需一致。是否跨域以浏览器页面的 Origin 为准；若页面从 `https://www.yanxiao.me` 打开，浏览器会先发送无 JWT 的 OPTIONS 预检。函数代码对这两个精确站点来源、请求方法 POST 和 X-JWT-Token/Content-Type/Accept 请求头的预检返回空体 204，不加载业务配置、不访问币安或 OSS。其他预检返回 403；实际 POST 的成功和错误响应均附带受信来源的 CORS 响应头，POST 的 JWT 校验保持不变。CDN/网关也须允许预检到达代码，或直接返回等价的预检响应；不能在代码之前因缺失 JWT 将 OPTIONS 拦截。不要把网站 Cookie 的 Path 扩大到 `/trade/api/sync`。前端主动设置 `credentials: omit`，只发送当前 JWT，不把网站 Cookie、CSRF、阿里云 AK 或币安密钥发送到首尔。
 
 ### 验证和边界
 
@@ -283,7 +285,7 @@ python -m unittest discover -s test -p 'test_deploy_fc.py' -v
 2. 前端从北京 `POST /api/private-auth/trading/binance/token` 获取新的同步专用 JWT，并在 120 秒内发送 `X-JWT-Token: Bearer <token>`。网站登录 Cookie、CSRF、阿里云 AccessKey 都不是此 JWT；浏览器地址栏直接访问发出的是 GET，也不会添加该 Header。
 3. 逐一核对实际回源入口：自定义域名鉴权与 HTTP 触发器鉴权是各自配置的位置。平台 Token 读取位置为 Header，名称为 `X-JWT-Token`（不要使用旧的 `Authorization` 或文档示例的 `Authentication`），去除前缀须与实际 `Bearer ` 及空格一致。若两处都启用 JWT，分别核对。
 4. 北京私钥、首尔环境变量 `SYNC_JWT_JWKS`、平台 JWKS 必须来自同一对密钥；默认 `kid=trade-sync-v1`，`alg=RS256`。平台填写 `public-jwks.json` 的完整公钥对象，不是 PEM、环境变量外壳或双重 JSON 字符串。
-5. CDN 透传 X-JWT-Token、POST 和请求体，禁止缓存 `/trade/api` 的所有响应，不做跨域重定向。使用同一份新 JWT 在可信本地工具分别请求真实首尔入口与 CDN 地址，定位是平台配置还是 CDN 转发；不得把凭证发到第三方回显服务。
+5. CDN 透传 X-JWT-Token、POST 和请求体，禁止缓存 `/trade/api/sync` 的所有响应，不做跨域重定向。使用同一份新 JWT 在可信本地工具分别请求真实首尔入口与 CDN 地址，定位是平台配置还是 CDN 转发；不得把凭证发到第三方回显服务。
 
 诊断时可向两个入口发送 POST 和 `{"action":"auth-check"}`。这个 action 故意不受支持；代码会在启动同步前拒绝，不读写 OSS 或请求币安。返回 `INVALID_REQUEST`（或通过鉴权后的业务配置错误）说明已进入函数并通过本地 JWT 校验；仍返回平台 `JWTTokenIsInvalid` 时继续核对入口 Header/JWKS。不要将 Token、私钥或完整环境变量贴入日志或反馈内容。
 
